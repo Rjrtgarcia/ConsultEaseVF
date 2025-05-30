@@ -168,6 +168,9 @@ class ConsultEaseApp:
 
         logger.info("Starting faculty controller")
         self.faculty_controller.start()
+        # Register callback to handle faculty status updates
+        self.faculty_controller.register_callback(self.handle_faculty_updated)
+        logger.info("Registered faculty controller callback for real-time updates")
 
         logger.info("Starting consultation controller")
         self.consultation_controller.start()
@@ -212,6 +215,9 @@ class ConsultEaseApp:
 
         # Store fullscreen preference for use in window creation
         self.fullscreen = fullscreen
+
+        # Test real-time updates after initialization
+        QTimer.singleShot(5000, self._test_real_time_updates)  # Test after 5 seconds
 
     def _register_system_services(self):
         """Register services with the system coordinator."""
@@ -1019,22 +1025,31 @@ class ConsultEaseApp:
                     "error"
                 )
 
-    def handle_faculty_updated(self):
+    def handle_faculty_updated(self, faculty=None):
         """
         Handle faculty data updated event with enhanced cross-dashboard synchronization.
-        """
-        logger.info("Faculty data updated - refreshing all active dashboards")
+        This method is called by the faculty controller when faculty status changes.
 
-        # Refresh student dashboard if active
+        Args:
+            faculty: Updated faculty object (optional)
+        """
+        logger.info(f"🔄 Faculty data updated - refreshing all active dashboards (Faculty: {faculty.name if faculty else 'all'})")
+
+        # Refresh student dashboard if active using real-time update method
         if self.dashboard_window and self.dashboard_window.isVisible():
             try:
-                faculties = self.faculty_controller.get_all_faculty()
-                logger.info(f"Refreshing student dashboard with {len(faculties)} faculty members")
-                self.dashboard_window.populate_faculty_grid(faculties)
+                # Use the new real-time update method for immediate response
+                if hasattr(self.dashboard_window, 'handle_real_time_faculty_update'):
+                    self.dashboard_window.handle_real_time_faculty_update(faculty)
+                else:
+                    # Fallback to old method if new method not available
+                    faculties = self.faculty_controller.get_all_faculty()
+                    logger.info(f"Refreshing student dashboard with {len(faculties)} faculty members")
+                    self.dashboard_window.populate_faculty_grid(faculties)
 
-                # Also update the consultation panel's faculty options
-                if hasattr(self.dashboard_window, 'consultation_panel'):
-                    self.dashboard_window.consultation_panel.set_faculty_options(faculties)
+                    # Also update the consultation panel's faculty options
+                    if hasattr(self.dashboard_window, 'consultation_panel'):
+                        self.dashboard_window.consultation_panel.set_faculty_options(faculties)
 
             except Exception as e:
                 logger.error(f"Error refreshing student dashboard: {e}")
@@ -1054,6 +1069,27 @@ class ConsultEaseApp:
                 self.faculty_controller.get_all_faculty.cache_clear()
             except Exception as e:
                 logger.debug(f"Cache clear not available: {e}")
+
+    def _test_real_time_updates(self):
+        """
+        Test the real-time update system to verify callbacks are working.
+        This method is called 5 seconds after application startup.
+        """
+        try:
+            logger.info("🧪 Testing real-time faculty update system...")
+
+            # Test the faculty controller's real-time update system
+            if hasattr(self, 'faculty_controller'):
+                success = self.faculty_controller.test_real_time_updates()
+                if success:
+                    logger.info("✅ Real-time update test completed successfully")
+                else:
+                    logger.warning("⚠️ Real-time update test failed")
+            else:
+                logger.error("❌ Faculty controller not available for testing")
+
+        except Exception as e:
+            logger.error(f"❌ Error testing real-time updates: {str(e)}")
 
     def handle_student_updated(self):
         """

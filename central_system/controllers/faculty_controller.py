@@ -48,6 +48,48 @@ class FacultyController:
         """
         logger.info("Stopping Faculty controller")
 
+    def test_real_time_updates(self):
+        """
+        Test the real-time update system by simulating a faculty status change.
+        This method is useful for debugging the callback system.
+        """
+        try:
+            logger.info("🧪 Testing real-time update system...")
+
+            # Get the first faculty member for testing
+            db = get_db()
+            faculty = db.query(Faculty).first()
+
+            if not faculty:
+                logger.warning("No faculty found for testing real-time updates")
+                return False
+
+            # Toggle the faculty status
+            original_status = faculty.status
+            new_status = not original_status
+
+            logger.info(f"🔄 Testing status change for {faculty.name}: {original_status} -> {new_status}")
+
+            # Update the status using the normal update method
+            updated_faculty = self.update_faculty_status(faculty.id, new_status)
+
+            if updated_faculty:
+                logger.info(f"✅ Test update successful - callbacks should have been triggered")
+
+                # Revert the status back to original
+                self.update_faculty_status(faculty.id, original_status)
+                logger.info(f"🔄 Reverted {faculty.name} status back to {original_status}")
+                return True
+            else:
+                logger.error("❌ Test update failed")
+                return False
+
+        except Exception as e:
+            logger.error(f"❌ Error testing real-time updates: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return False
+
     def register_callback(self, callback):
         """
         Register a callback to be called when faculty status changes.
@@ -65,11 +107,17 @@ class FacultyController:
         Args:
             faculty (Faculty): Updated faculty object
         """
-        for callback in self.callbacks:
+        logger.info(f"🔔 Notifying {len(self.callbacks)} callbacks about faculty {faculty.name} (ID: {faculty.id}) status change")
+        for i, callback in enumerate(self.callbacks):
             try:
+                callback_name = getattr(callback, '__name__', f'callback_{i}')
+                logger.debug(f"📞 Calling callback {callback_name} for faculty {faculty.name}")
                 callback(faculty)
+                logger.debug(f"✅ Callback {callback_name} completed successfully")
             except Exception as e:
-                logger.error(f"Error in Faculty controller callback: {str(e)}")
+                logger.error(f"❌ Error in Faculty controller callback {callback_name}: {str(e)}")
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
 
     def handle_faculty_status_update(self, topic, data):
         """

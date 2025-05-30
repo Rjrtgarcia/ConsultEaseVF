@@ -221,10 +221,10 @@ class DashboardWindow(BaseWindow):
         self.init_ui()
 
         # Set up smart refresh manager for optimized faculty status updates
-        self.smart_refresh = SmartRefreshManager(base_interval=180000, max_interval=600000)
+        self.smart_refresh = SmartRefreshManager(base_interval=30000, max_interval=180000)  # Reduced intervals
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self.refresh_faculty_status)
-        self.refresh_timer.start(180000)  # Start with 3 minutes
+        self.refresh_timer.start(30000)  # Start with 30 seconds for more responsive updates
 
         # UI performance utilities
         self.ui_batcher = get_ui_batcher()
@@ -235,6 +235,9 @@ class DashboardWindow(BaseWindow):
 
         # Track faculty data for efficient comparison
         self._last_faculty_hash = None
+
+        # Flag to track if real-time updates are enabled
+        self._real_time_updates_enabled = True
 
         # Loading state management
         self._is_loading = False
@@ -1110,6 +1113,35 @@ class DashboardWindow(BaseWindow):
             # Reset consecutive no-change counter on errors to ensure we don't slow down too much
             if hasattr(self, '_consecutive_no_changes'):
                 self._consecutive_no_changes = 0
+
+    def handle_real_time_faculty_update(self, faculty=None):
+        """
+        Handle real-time faculty status updates from the main application.
+        This method is called when faculty status changes are detected via MQTT.
+
+        Args:
+            faculty: Updated faculty object (optional, if None will refresh all)
+        """
+        if not self._real_time_updates_enabled:
+            logger.debug("Real-time updates disabled, skipping update")
+            return
+
+        try:
+            logger.info(f"🔄 Real-time faculty update received for: {faculty.name if faculty else 'all faculty'}")
+
+            # Trigger immediate refresh of faculty status
+            self.refresh_faculty_status()
+
+            # Reset the timer to prevent immediate duplicate refresh
+            if hasattr(self, 'refresh_timer') and self.refresh_timer:
+                self.refresh_timer.stop()
+                self.refresh_timer.start(30000)  # Restart with 30-second interval
+
+            logger.debug("Real-time faculty update processed successfully")
+
+        except Exception as e:
+            logger.error(f"Error handling real-time faculty update: {str(e)}")
+            # Don't show user notification for real-time update errors to avoid spam
 
     def _extract_faculty_data(self, faculties):
         """
