@@ -66,14 +66,21 @@ class DatabaseManager:
 
         # Statistics and monitoring
         self.stats = ConnectionStats()
-        self.health_check_interval = 30.0  # seconds
+
+        # Load health monitoring configuration
+        from ..config import get_config
+        config = get_config()
+        self.health_monitoring_enabled = config.get('database.health_monitoring_enabled', False)
+        self.auto_restart_enabled = config.get('database.auto_restart_enabled', False)
+        self.health_check_interval = config.get('database.health_check_interval', 300.0)  # seconds
+
         self.last_health_check = None
         self.is_healthy = False
 
         # Thread safety
         self.lock = threading.RLock()
 
-        # Health monitoring
+        # Health monitoring (disabled by default for stability)
         self.health_monitor_thread = None
         self.monitoring_enabled = False
 
@@ -136,8 +143,12 @@ class DatabaseManager:
                     self.is_healthy = True
                     logger.info("Database manager initialized successfully")
 
-                    # Start health monitoring
-                    self.start_health_monitoring()
+                    # Start health monitoring only if enabled
+                    if self.health_monitoring_enabled:
+                        logger.info("Starting database health monitoring")
+                        self.start_health_monitoring()
+                    else:
+                        logger.info("Database health monitoring disabled for stability")
                     return True
                 else:
                     logger.error("Failed to establish initial database connection")
@@ -199,9 +210,12 @@ class DatabaseManager:
                     logger.info(f"Retrying database connection in {wait_time} seconds...")
                     time.sleep(wait_time)
 
-                    # Try to reinitialize if connection is completely lost
-                    if isinstance(e, (DisconnectionError, OperationalError)):
+                    # Try to reinitialize if connection is completely lost (only if auto-restart enabled)
+                    if self.auto_restart_enabled and isinstance(e, (DisconnectionError, OperationalError)):
+                        logger.info("Auto-restart enabled, attempting to reinitialize database engine")
                         self._reinitialize_engine()
+                    elif isinstance(e, (DisconnectionError, OperationalError)):
+                        logger.warning("Database connection lost, but auto-restart disabled for stability")
 
         # All attempts failed
         self.stats.last_error = str(last_error)
@@ -357,8 +371,12 @@ class DatabaseManager:
 
                     if not self.is_healthy:
                         logger.warning("Database health check failed")
-                        # Try to reinitialize if unhealthy
-                        self._reinitialize_engine()
+                        # Try to reinitialize if unhealthy (only if auto-restart enabled)
+                        if self.auto_restart_enabled:
+                            logger.info("Auto-restart enabled, attempting to reinitialize database engine")
+                            self._reinitialize_engine()
+                        else:
+                            logger.warning("Database unhealthy, but auto-restart disabled for stability")
 
                 time.sleep(5.0)  # Check every 5 seconds
 

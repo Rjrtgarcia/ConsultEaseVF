@@ -22,7 +22,8 @@ class AsyncMQTTService:
     Uses a background thread pool and message queuing for optimal performance on Raspberry Pi.
     """
 
-    def __init__(self, broker_host='localhost', broker_port=1883, username=None, password=None, max_queue_size=1000):
+    def __init__(self, broker_host='localhost', broker_port=1883, username=None, password=None, max_queue_size=1000,
+                 keepalive=60, reconnect_delay_min=1, reconnect_delay_max=120, max_inflight_messages=20, max_queued_messages=100):
         """
         Initialize the asynchronous MQTT service.
 
@@ -32,12 +33,22 @@ class AsyncMQTTService:
             username: MQTT username (optional)
             password: MQTT password (optional)
             max_queue_size: Maximum queue size for pending messages
+            keepalive: MQTT keepalive interval
+            reconnect_delay_min: Minimum reconnect delay
+            reconnect_delay_max: Maximum reconnect delay
+            max_inflight_messages: Maximum inflight messages
+            max_queued_messages: Maximum queued messages
         """
         self.broker_host = broker_host
         self.broker_port = broker_port
         self.username = username
         self.password = password
         self.max_queue_size = max_queue_size
+        self.keepalive = keepalive
+        self.reconnect_delay_min = reconnect_delay_min
+        self.reconnect_delay_max = reconnect_delay_max
+        self.max_inflight_messages = max_inflight_messages
+        self.max_queued_messages = max_queued_messages
 
         # MQTT client
         self.client = None
@@ -92,9 +103,9 @@ class AsyncMQTTService:
             self.client.on_publish = self._on_publish
 
             # Configure client options for reliability
-            self.client.reconnect_delay_set(min_delay=1, max_delay=120)
-            self.client.max_inflight_messages_set(20)
-            self.client.max_queued_messages_set(100)
+            self.client.reconnect_delay_set(min_delay=self.reconnect_delay_min, max_delay=self.reconnect_delay_max)
+            self.client.max_inflight_messages_set(self.max_inflight_messages)
+            self.client.max_queued_messages_set(self.max_queued_messages)
 
             logger.debug("MQTT client initialized")
 
@@ -116,6 +127,26 @@ class AsyncMQTTService:
                     logger.debug(f"Resubscribed to topic: {topic}")
                 except Exception as e:
                     logger.error(f"Error resubscribing to topic {topic}: {e}")
+
+            # Subscribe to faculty desk unit topics for real-time communication
+            faculty_topics = [
+                "consultease/faculty/+/status",
+                "consultease/faculty/+/mac_status",
+                "consultease/faculty/+/requests",
+                "consultease/faculty/+/presence",
+                "professor/status",
+                "professor/messages",
+                "professor/+/status",
+                "professor/+/presence"
+            ]
+
+            for topic in faculty_topics:
+                try:
+                    client.subscribe(topic, 1)  # QoS 1 for reliable delivery
+                    logger.info(f"Subscribed to faculty desk unit topic: {topic}")
+                except Exception as e:
+                    logger.error(f"Error subscribing to faculty topic {topic}: {e}")
+
         else:
             self.is_connected = False
             logger.error(f"Failed to connect to MQTT broker. Return code: {rc}")
@@ -251,7 +282,7 @@ class AsyncMQTTService:
 
         def _connect():
             try:
-                self.client.connect_async(self.broker_host, self.broker_port, 60)
+                self.client.connect_async(self.broker_host, self.broker_port, self.keepalive)
                 self.client.loop_start()
                 logger.debug("MQTT connection initiated")
             except Exception as e:
@@ -490,13 +521,19 @@ def get_async_mqtt_service() -> AsyncMQTTService:
     global _async_mqtt_service
     if _async_mqtt_service is None:
         # Import configuration
-        from ..utils.config_manager import get_config
+        from ..config import get_config
+        config = get_config()
 
         _async_mqtt_service = AsyncMQTTService(
-            broker_host=get_config('mqtt.broker_host', 'localhost'),
-            broker_port=get_config('mqtt.broker_port', 1883),
-            username=get_config('mqtt.username'),
-            password=get_config('mqtt.password')
+            broker_host=config.get('mqtt.broker_host', 'localhost'),
+            broker_port=config.get('mqtt.broker_port', 1883),
+            username=config.get('mqtt.username'),
+            password=config.get('mqtt.password'),
+            keepalive=config.get('mqtt.keepalive', 60),
+            reconnect_delay_min=config.get('mqtt.reconnect_delay_min', 1),
+            reconnect_delay_max=config.get('mqtt.reconnect_delay_max', 120),
+            max_inflight_messages=config.get('mqtt.max_inflight_messages', 20),
+            max_queued_messages=config.get('mqtt.max_queued_messages', 100)
         )
 
     return _async_mqtt_service

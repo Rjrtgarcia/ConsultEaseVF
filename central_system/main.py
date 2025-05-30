@@ -217,15 +217,15 @@ class ConsultEaseApp:
         """Register services with the system coordinator."""
         logger.info("Registering system services with coordinator")
 
-        # Register database service
+        # Register database service (with disabled auto-restart for stability)
         self.system_coordinator.register_service(
             name="database",
             dependencies=[],
             startup_callback=self._start_database_service,
             shutdown_callback=self._stop_database_service,
             health_check_callback=self._check_database_health,
-            health_check_interval=30.0,
-            max_restart_attempts=3
+            health_check_interval=300.0,  # Increased interval for stability
+            max_restart_attempts=0  # Disable automatic restarts for database stability
         )
 
         # Register MQTT service
@@ -287,6 +287,10 @@ class ConsultEaseApp:
         try:
             from .services.async_mqtt_service import get_async_mqtt_service
             mqtt_service = get_async_mqtt_service()
+
+            # Register message handlers for faculty desk units
+            self._register_mqtt_handlers(mqtt_service)
+
             mqtt_service.start()
             mqtt_service.connect()
             return True
@@ -313,6 +317,79 @@ class ConsultEaseApp:
         except Exception as e:
             logger.debug(f"MQTT health check failed: {e}")
             return False
+
+    def _register_mqtt_handlers(self, mqtt_service):
+        """Register MQTT message handlers for faculty desk units."""
+        try:
+            # Register handler for faculty status updates
+            mqtt_service.register_topic_handler("consultease/faculty/+/status", self._handle_faculty_status)
+            mqtt_service.register_topic_handler("consultease/faculty/+/mac_status", self._handle_faculty_mac_status)
+            mqtt_service.register_topic_handler("consultease/faculty/+/requests", self._handle_faculty_requests)
+            mqtt_service.register_topic_handler("consultease/faculty/+/presence", self._handle_faculty_presence)
+
+            # Register handlers for professor topics (alternative naming)
+            mqtt_service.register_topic_handler("professor/status", self._handle_professor_status)
+            mqtt_service.register_topic_handler("professor/messages", self._handle_professor_messages)
+            mqtt_service.register_topic_handler("professor/+/status", self._handle_professor_status)
+            mqtt_service.register_topic_handler("professor/+/presence", self._handle_professor_presence)
+
+            logger.info("MQTT message handlers registered for faculty desk units")
+        except Exception as e:
+            logger.error(f"Error registering MQTT handlers: {e}")
+
+    def _handle_faculty_status(self, topic, data):
+        """Handle faculty status updates from desk units."""
+        try:
+            logger.info(f"📡 Faculty status update received - Topic: {topic}, Data: {data}")
+            # Extract faculty ID from topic if possible
+            topic_parts = topic.split('/')
+            if len(topic_parts) >= 3:
+                faculty_id = topic_parts[2]
+                logger.info(f"👨‍🏫 Faculty {faculty_id} status update: {data}")
+        except Exception as e:
+            logger.error(f"Error handling faculty status: {e}")
+
+    def _handle_faculty_mac_status(self, topic, data):
+        """Handle faculty MAC status updates from desk units."""
+        try:
+            logger.info(f"📡 Faculty MAC status update received - Topic: {topic}, Data: {data}")
+        except Exception as e:
+            logger.error(f"Error handling faculty MAC status: {e}")
+
+    def _handle_faculty_requests(self, topic, data):
+        """Handle faculty consultation requests from desk units."""
+        try:
+            logger.info(f"📡 Faculty consultation request received - Topic: {topic}, Data: {data}")
+        except Exception as e:
+            logger.error(f"Error handling faculty requests: {e}")
+
+    def _handle_faculty_presence(self, topic, data):
+        """Handle faculty presence updates from desk units."""
+        try:
+            logger.info(f"📡 Faculty presence update received - Topic: {topic}, Data: {data}")
+        except Exception as e:
+            logger.error(f"Error handling faculty presence: {e}")
+
+    def _handle_professor_status(self, topic, data):
+        """Handle professor status updates (alternative topic naming)."""
+        try:
+            logger.info(f"📡 Professor status update received - Topic: {topic}, Data: {data}")
+        except Exception as e:
+            logger.error(f"Error handling professor status: {e}")
+
+    def _handle_professor_messages(self, topic, data):
+        """Handle professor messages (alternative topic naming)."""
+        try:
+            logger.info(f"📡 Professor message received - Topic: {topic}, Data: {data}")
+        except Exception as e:
+            logger.error(f"Error handling professor messages: {e}")
+
+    def _handle_professor_presence(self, topic, data):
+        """Handle professor presence updates (alternative topic naming)."""
+        try:
+            logger.info(f"📡 Professor presence update received - Topic: {topic}, Data: {data}")
+        except Exception as e:
+            logger.error(f"Error handling professor presence: {e}")
 
     def _start_ui_service(self):
         """Start UI service."""

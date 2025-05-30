@@ -25,7 +25,10 @@ class Config:
             "pool_size": 5,
             "max_overflow": 10,
             "pool_timeout": 30,
-            "pool_recycle": 1800
+            "pool_recycle": 1800,
+            "health_monitoring_enabled": False,
+            "auto_restart_enabled": False,
+            "health_check_interval": 300
         },
         "mqtt": {
             "broker_host": "localhost",
@@ -33,7 +36,12 @@ class Config:
             "use_tls": False,
             "username": "",
             "password": "",
-            "client_id": "central_system"
+            "client_id": "central_system",
+            "keepalive": 60,
+            "reconnect_delay_min": 1,
+            "reconnect_delay_max": 120,
+            "max_inflight_messages": 20,
+            "max_queued_messages": 100
         },
         "ui": {
             "fullscreen": True,
