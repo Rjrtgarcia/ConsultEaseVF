@@ -1091,6 +1091,27 @@ class ConsultEaseApp:
         except Exception as e:
             logger.error(f"❌ Error testing real-time updates: {str(e)}")
 
+    def run_mqtt_diagnostics(self):
+        """
+        Run comprehensive MQTT diagnostics to troubleshoot communication issues.
+        This method can be called manually to diagnose MQTT problems.
+        """
+        try:
+            logger.info("🔍 Running comprehensive MQTT diagnostics...")
+
+            # Import and run diagnostics
+            from .utils.mqtt_diagnostics import MQTTDiagnostics
+
+            diagnostics = MQTTDiagnostics()
+            diagnostics.start_diagnostics(duration_minutes=1)  # Quick 1-minute test
+
+            logger.info("✅ MQTT diagnostics completed")
+
+        except Exception as e:
+            logger.error(f"❌ Error running MQTT diagnostics: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+
     def handle_student_updated(self):
         """
         Handle student data updated event.
