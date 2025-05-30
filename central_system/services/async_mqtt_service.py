@@ -77,8 +77,17 @@ class AsyncMQTTService:
         self._initialize_client()
 
     def _initialize_client(self):
-        """Initialize MQTT client with callbacks."""
+        """Initialize MQTT client with callbacks and improved stability."""
         try:
+            # Clean up existing client if any
+            if self.client:
+                try:
+                    self.client.loop_stop()
+                    self.client.disconnect()
+                except:
+                    pass
+                self.client = None
+
             self.client = mqtt.Client()
 
             # Set authentication if provided
@@ -280,10 +289,20 @@ class AsyncMQTTService:
         self.executor.submit(_connect)
 
     def disconnect(self):
-        """Disconnect from MQTT broker."""
-        if self.client:
-            self.client.loop_stop()
-            self.client.disconnect()
+        """Disconnect from MQTT broker safely."""
+        try:
+            if self.client:
+                self.is_connected = False
+                self.client.loop_stop()
+                self.client.disconnect()
+                # Clear the socket reference to prevent AttributeError
+                if hasattr(self.client, '_sock'):
+                    self.client._sock = None
+                logger.info("MQTT client disconnected safely")
+        except Exception as e:
+            logger.error(f"Error during MQTT disconnect: {e}")
+            # Force reset connection state
+            self.is_connected = False
 
     def publish_async(self, topic: str, data: Any, qos: int = 1, retain: bool = False, batch: bool = True):
         """

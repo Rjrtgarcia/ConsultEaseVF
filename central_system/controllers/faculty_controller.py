@@ -1,5 +1,6 @@
 import logging
 import datetime
+import threading
 from sqlalchemy import or_, func
 from ..models import Faculty
 from ..utils.mqtt_utils import publish_faculty_status, subscribe_to_topic, publish_mqtt_message
@@ -26,6 +27,50 @@ class FacultyController:
         """
         self.callbacks = []
         self.queue_service = get_consultation_queue_service()
+
+        # Thread-safe lock management
+        self._status_locks = {}
+        self._lock_creation_lock = threading.Lock()
+        self._cache_invalidation_lock = threading.Lock()
+
+    def _get_faculty_lock(self, faculty_id):
+        """Get or create a thread-safe lock for faculty status updates."""
+        lock_key = f"faculty_status_{faculty_id}"
+
+        if lock_key not in self._status_locks:
+            with self._lock_creation_lock:
+                # Double-check pattern to prevent race conditions
+                if lock_key not in self._status_locks:
+                    self._status_locks[lock_key] = threading.Lock()
+
+        return self._status_locks[lock_key]
+
+    def _invalidate_caches_atomic(self):
+        """Invalidate caches atomically to prevent race conditions."""
+        try:
+            # Use a lock to ensure atomic cache invalidation
+            with self._cache_invalidation_lock:
+                invalidate_faculty_cache()
+                invalidate_cache_pattern("get_all_faculty")
+                # Clear method-level cache
+                if hasattr(self.get_all_faculty, 'cache_clear'):
+                    self.get_all_faculty.cache_clear()
+        except Exception as e:
+            logger.error(f"Error invalidating caches: {e}")
+
+    def _create_safe_faculty_data(self, faculty):
+        """Create safe faculty data dictionary from faculty object."""
+        return {
+            'id': faculty.id,
+            'name': faculty.name,
+            'department': faculty.department,
+            'status': faculty.status,
+            'always_available': getattr(faculty, 'always_available', False),
+            'last_seen': faculty.last_seen.isoformat() if faculty.last_seen else None,
+            'email': getattr(faculty, 'email', ''),
+            'ble_id': getattr(faculty, 'ble_id', ''),
+            'version': getattr(faculty, 'version', 1)
+        }
 
     def start(self):
         """
@@ -406,17 +451,8 @@ class FacultyController:
         Returns:
             dict: Safe faculty data dictionary or None if not found
         """
-        import threading
-
-        # Use a lock to prevent concurrent status updates for the same faculty
-        lock_key = f"faculty_status_{faculty_id}"
-        if not hasattr(self, '_status_locks'):
-            self._status_locks = {}
-
-        if lock_key not in self._status_locks:
-            self._status_locks[lock_key] = threading.Lock()
-
-        with self._status_locks[lock_key]:
+        # Use thread-safe lock management
+        with self._get_faculty_lock(faculty_id):
             try:
                 # Use database manager for thread-safe operations
                 from ..services.database_manager import get_database_manager
@@ -462,25 +498,14 @@ class FacultyController:
 
                     logger.info(f"Atomically updated status for faculty {faculty.name} (ID: {faculty.id}): {previous_status} -> {status}")
 
-                    # Create a safe faculty data dictionary to avoid DetachedInstanceError
-                    faculty_data = {
-                        'id': faculty.id,
-                        'name': faculty.name,
-                        'department': faculty.department,
-                        'status': faculty.status,
-                        'last_seen': faculty.last_seen.isoformat() if faculty.last_seen else None,
-                        'version': getattr(faculty, 'version', 1)
-                    }
+                    # Create safe faculty data before session closes
+                    faculty_data = self._create_safe_faculty_data(faculty)
 
-                    # Commit the transaction explicitly
-                    db.commit()
+                    # Let context manager handle commit automatically
+                    # No manual commit() or refresh() needed
 
-                    # Refresh the faculty object to ensure it's up to date
-                    db.refresh(faculty)
-
-                # Invalidate faculty cache when status changes (outside transaction)
-                invalidate_faculty_cache()
-                invalidate_cache_pattern("get_all_faculty")
+                # Invalidate faculty cache when status changes (after successful transaction)
+                self._invalidate_caches_atomic()
 
                 # Publish MQTT notification with sequence number to ensure ordering
                 if faculty_data and previous_status is not None:

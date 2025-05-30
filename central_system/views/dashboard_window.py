@@ -222,9 +222,10 @@ class DashboardWindow(BaseWindow):
 
         # Set up smart refresh manager for optimized faculty status updates
         self.smart_refresh = SmartRefreshManager(base_interval=180000, max_interval=600000)
-        self.refresh_timer = QTimer(self)
-        self.refresh_timer.timeout.connect(self.refresh_faculty_status)
-        self.refresh_timer.start(180000)  # Start with 3 minutes
+
+        # Initialize timer in main thread to avoid Qt threading issues
+        self.refresh_timer = None
+        self._setup_refresh_timer()
 
         # UI performance utilities
         self.ui_batcher = get_ui_batcher()
@@ -242,6 +243,9 @@ class DashboardWindow(BaseWindow):
 
         # Set up MQTT status update listeners for real-time updates
         self._setup_mqtt_listeners()
+
+        # Setup refresh timer after MQTT listeners
+        self._setup_refresh_timer()
 
         # Log student info for debugging
         if student:
@@ -560,6 +564,37 @@ class DashboardWindow(BaseWindow):
         central_widget = QWidget()
         central_widget.setLayout(main_layout)
         self.setCentralWidget(central_widget)
+
+    def _setup_refresh_timer(self):
+        """Setup refresh timer in main thread to avoid Qt threading issues."""
+        try:
+            from PyQt5.QtCore import QThread
+
+            # Only create timer if we're in the main thread
+            if QThread.currentThread() == QApplication.instance().thread():
+                if not self.refresh_timer:
+                    self.refresh_timer = QTimer(self)
+                    self.refresh_timer.timeout.connect(self.refresh_faculty_status)
+                    self.refresh_timer.start(180000)  # Start with 3 minutes
+                    logger.debug("Refresh timer setup successfully in main thread")
+            else:
+                logger.warning("Cannot setup refresh timer - not in main thread")
+                # Schedule timer setup in main thread
+                from PyQt5.QtCore import QMetaObject, Qt
+                QMetaObject.invokeMethod(self, "_setup_refresh_timer_delayed", Qt.QueuedConnection)
+        except Exception as e:
+            logger.error(f"Error setting up refresh timer: {e}")
+
+    def _setup_refresh_timer_delayed(self):
+        """Delayed timer setup for when called from non-main thread."""
+        try:
+            if not self.refresh_timer:
+                self.refresh_timer = QTimer(self)
+                self.refresh_timer.timeout.connect(self.refresh_faculty_status)
+                self.refresh_timer.start(180000)
+                logger.debug("Delayed refresh timer setup completed")
+        except Exception as e:
+            logger.error(f"Error in delayed refresh timer setup: {e}")
 
     def populate_faculty_grid_safe(self, faculty_data_list):
         """

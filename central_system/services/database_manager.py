@@ -322,14 +322,26 @@ class DatabaseManager:
             }
 
     def _test_connection(self) -> bool:
-        """Test database connection."""
+        """Test database connection with improved error handling."""
         try:
+            # Use a timeout for the connection test
             with self.engine.connect() as conn:
+                # Set a statement timeout for the health check
+                if self.database_url.startswith('postgresql'):
+                    conn.execute(text("SET statement_timeout = '5s'"))
+
                 result = conn.execute(text("SELECT 1 as health_check"))
                 row = result.fetchone()
-                return row and row[0] == 1
+                success = row and row[0] == 1
+
+                if success:
+                    logger.debug("Database health check passed")
+                else:
+                    logger.warning("Database health check returned unexpected result")
+
+                return success
         except Exception as e:
-            logger.error(f"Database connection test failed: {e}")
+            logger.debug(f"Database connection test failed: {e}")
             return False
 
     def _test_session_health(self, session: Session) -> bool:
