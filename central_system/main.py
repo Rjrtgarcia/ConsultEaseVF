@@ -124,9 +124,6 @@ class ConsultEaseApp:
         logger.info("Initializing database and ensuring admin account integrity...")
         init_db()
 
-        # Perform additional admin account verification after database initialization
-        self._verify_admin_account_startup()
-
         # Start system monitoring
         logger.info("Starting system monitoring...")
         from .utils.system_monitor import start_system_monitoring
@@ -154,6 +151,9 @@ class ConsultEaseApp:
 
         # Ensure default admin exists
         self.admin_controller.ensure_default_admin()
+
+        # Perform additional admin account verification after admin controller initialization
+        self._verify_admin_account_startup()
 
         # Initialize windows
         self.login_window = None
@@ -348,6 +348,11 @@ class ConsultEaseApp:
         try:
             logger.info("🔐 Performing startup admin account verification...")
 
+            # Check if admin controller is available
+            if not hasattr(self, 'admin_controller') or self.admin_controller is None:
+                logger.error("❌ Admin controller not initialized - skipping verification")
+                return
+
             # Test admin login functionality
             result = self.admin_controller.authenticate("admin", "TempPass123!")
 
@@ -381,6 +386,11 @@ class ConsultEaseApp:
         """
         try:
             logger.warning("🚨 Performing emergency admin account repair...")
+
+            # Check if admin controller is available
+            if not hasattr(self, 'admin_controller') or self.admin_controller is None:
+                logger.error("❌ Admin controller not available for repair")
+                return
 
             from .models.base import get_db
             from .models.admin import Admin

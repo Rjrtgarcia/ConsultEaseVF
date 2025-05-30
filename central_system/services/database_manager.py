@@ -111,11 +111,6 @@ class DatabaseManager:
                         connect_args={
                             "check_same_thread": False,  # Allow SQLite to be used across threads
                             "timeout": 60,  # Increased timeout to reduce false failures
-                            "isolation_level": None,  # Autocommit mode for better concurrency
-                            "journal_mode": "WAL",  # Write-Ahead Logging for better concurrency
-                            "synchronous": "NORMAL",  # Balanced safety/performance
-                            "cache_size": -64000,  # 64MB cache for better performance
-                            "temp_store": "memory"  # Use memory for temp tables
                         },
                         pool_pre_ping=False,  # Disabled for SQLite - causes unnecessary overhead
                         echo=False  # Set to True for SQL debugging
@@ -356,7 +351,10 @@ class DatabaseManager:
 
                 return success
         except Exception as e:
-            logger.debug(f"Database connection test failed: {e}")
+            logger.error(f"Database connection test failed: {e}")
+            logger.error(f"Database URL: {self.database_url}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return False
 
     def _test_connection_with_retry(self, max_retries: int = 3) -> bool:
@@ -572,8 +570,8 @@ def get_database_manager() -> DatabaseManager:
             pool_recycle=db_config.get('pool_recycle', 1800)
         )
 
-        # Initialize the manager
-        _database_manager.initialize()
+        # Don't initialize here - let the service coordinator handle initialization
+        # _database_manager.initialize()
 
     return _database_manager
 
