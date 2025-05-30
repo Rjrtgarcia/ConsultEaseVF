@@ -341,8 +341,26 @@ class FacultyController:
             # Notify consultation queue service about faculty status change
             self.queue_service.update_faculty_status(faculty_id, status)
 
-            # Notify callbacks
-            self._notify_callbacks(faculty)
+            # Create a safe faculty data dictionary for callbacks to avoid DetachedInstanceError
+            try:
+                faculty_data_for_callback = {
+                    'id': faculty.id,
+                    'name': faculty.name,
+                    'department': faculty.department,
+                    'status': faculty.status,
+                    'last_seen': faculty.last_seen.isoformat() if faculty.last_seen else None
+                }
+
+                # Notify callbacks with safe data
+                for callback in self.callbacks:
+                    try:
+                        # Pass the safe data dictionary instead of the faculty object
+                        callback(faculty_data_for_callback)
+                    except Exception as e:
+                        logger.error(f"Error in Faculty controller callback: {str(e)}")
+
+            except Exception as e:
+                logger.error(f"Error creating faculty data for callbacks: {str(e)}")
 
             # Publish a notification about faculty availability using async MQTT
             try:
@@ -452,9 +470,8 @@ class FacultyController:
                 if faculty_data and previous_status is not None:
                     self._publish_status_update_with_sequence_safe(faculty_data, status, previous_status)
 
-                # Notify callbacks about the status change
-                if updated_faculty:
-                    self._notify_callbacks(updated_faculty)
+                # Note: Don't call _notify_callbacks here as it's called in handle_faculty_status_update
+                # to avoid duplicate notifications and potential DetachedInstanceError
 
                 return updated_faculty
 

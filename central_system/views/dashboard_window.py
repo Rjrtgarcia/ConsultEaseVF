@@ -274,6 +274,8 @@ class DashboardWindow(BaseWindow):
             logger.info("Dashboard MQTT listeners set up successfully")
         except Exception as e:
             logger.error(f"Error setting up MQTT listeners: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
 
     def _handle_faculty_status_update(self, topic, data):
         """
@@ -1195,8 +1197,6 @@ class DashboardWindow(BaseWindow):
                 self._last_history_refresh = current_time
 
         except Exception as e:
-            import logging
-            logger = logging.getLogger(__name__)
             logger.error(f"Error refreshing faculty status: {str(e)}")
 
             # Hide loading indicator on error

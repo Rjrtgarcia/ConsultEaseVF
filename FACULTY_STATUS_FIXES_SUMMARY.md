@@ -115,6 +115,23 @@ if isinstance(faculty_data, int):
    - Enhanced consultation form data validation
    - Added proper cleanup methods
 
+## Critical Issues Identified and Fixed
+
+### Issue 1: Duplicate Callback Notifications
+**Problem**: The `_notify_callbacks` method was being called twice - once in `update_faculty_status` and once in `handle_faculty_status_update`, causing potential DetachedInstanceError.
+
+**Fix Applied**: Removed duplicate callback notification from `update_faculty_status` and implemented safe callback notification in `handle_faculty_status_update` using faculty data dictionaries instead of faculty objects.
+
+### Issue 2: Dashboard Logger Scope Error
+**Problem**: Logger variable was not properly scoped in dashboard window exception handlers.
+
+**Fix Applied**: Removed redundant logger import and used the module-level logger consistently.
+
+### Issue 3: Faculty Object Session Management
+**Problem**: Faculty objects were being passed to callbacks outside their database session context, causing DetachedInstanceError.
+
+**Fix Applied**: Created safe faculty data dictionaries for callback notifications to avoid session-related issues.
+
 ## Expected Results
 
 After these fixes:
@@ -123,6 +140,24 @@ After these fixes:
 2. **Real-time Updates**: Faculty availability should update immediately when ESP32 desk units report status changes
 3. **Consultation Form**: Clicking on faculty cards should properly open the consultation form without type errors
 4. **System Stability**: Overall system should be more robust with better error handling and logging
+5. **MQTT Processing**: MQTT message processing should resume normal operation with proper database logging
+
+## Debugging Steps to Verify Fixes
+
+1. **Check MQTT Service Status**:
+   - Verify MQTT service is connected and running
+   - Check system coordinator logs for service startup issues
+   - Monitor MQTT message handlers registration
+
+2. **Test Faculty Status Updates**:
+   - Send test MQTT messages to `consultease/faculty/1/status`
+   - Monitor faculty controller logs for message processing
+   - Verify database updates are occurring
+
+3. **Monitor Dashboard Updates**:
+   - Check if dashboard MQTT listeners are properly registered
+   - Verify real-time faculty status updates without logout/login
+   - Test consultation form opening functionality
 
 ## Testing Recommendations
 
@@ -131,3 +166,5 @@ After these fixes:
 3. Test consultation form opening from faculty cards
 4. Monitor logs for any remaining database session issues
 5. Test system under concurrent faculty status updates
+6. Check MQTT service health and connection status
+7. Verify faculty controller MQTT subscriptions are active
