@@ -612,7 +612,7 @@ class FacultyController:
 
     def handle_concurrent_status_update(self, faculty_id, status, source="unknown"):
         """
-        Handle concurrent status updates with conflict resolution.
+        Handle concurrent status updates with conflict resolution and database restart protection.
 
         Args:
             faculty_id (int): Faculty ID
@@ -622,11 +622,20 @@ class FacultyController:
         Returns:
             dict: Safe faculty data dictionary or None if failed
         """
-        max_retries = 3
+        max_retries = 5  # Increased for database restart protection
         retry_delay = 0.1  # 100ms
 
         for attempt in range(max_retries):
             try:
+                # Check database health before attempting update
+                from ..services.database_manager import get_database_manager
+                db_manager = get_database_manager()
+
+                if not db_manager.is_healthy and attempt == 0:
+                    logger.warning(f"Database unhealthy, waiting for recovery before updating faculty {faculty_id}")
+                    import time
+                    time.sleep(2.0)
+
                 # Attempt atomic update
                 faculty_data = self.update_faculty_status(faculty_id, status)
 
@@ -637,11 +646,22 @@ class FacultyController:
                     logger.warning(f"Failed to update faculty {faculty_id} status (attempt {attempt + 1})")
 
             except Exception as e:
-                logger.warning(f"Concurrent update conflict for faculty {faculty_id} (attempt {attempt + 1}): {e}")
+                # Check if this is a database connection error
+                error_str = str(e).lower()
+                is_db_error = any(keyword in error_str for keyword in [
+                    'database', 'connection', 'timeout', 'operational', 'disconnection'
+                ])
+
+                if is_db_error:
+                    logger.warning(f"Database error updating faculty {faculty_id} (attempt {attempt + 1}): {e}")
+                else:
+                    logger.warning(f"Concurrent update conflict for faculty {faculty_id} (attempt {attempt + 1}): {e}")
 
                 if attempt < max_retries - 1:
                     import time
-                    time.sleep(retry_delay * (2 ** attempt))  # Exponential backoff
+                    # Longer wait for database errors
+                    wait_time = (2.0 if is_db_error else retry_delay) * (2 ** attempt)
+                    time.sleep(min(wait_time, 10.0))  # Cap at 10 seconds
 
         logger.error(f"Failed to update faculty {faculty_id} status after {max_retries} attempts")
         return None

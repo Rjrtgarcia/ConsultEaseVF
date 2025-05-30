@@ -66,9 +66,19 @@ class DatabaseManager:
 
         # Statistics and monitoring
         self.stats = ConnectionStats()
-        self.health_check_interval = 30.0  # seconds
+        self.health_check_interval = 120.0  # Increased to 2 minutes to reduce false positives
         self.last_health_check = None
         self.is_healthy = False
+
+        # Enhanced health check configuration
+        self.health_check_failure_threshold = 5  # Allow more failures before restart
+        self.health_check_consecutive_failures = 0
+        self.last_successful_health_check = None
+
+        # Grace period and restart cooldown
+        self.health_check_grace_period = 300.0  # 5 minutes grace period
+        self.restart_cooldown = 600.0  # 10 minutes between restarts
+        self.last_restart_time = None
 
         # Thread safety
         self.lock = threading.RLock()
@@ -94,18 +104,23 @@ class DatabaseManager:
             try:
                 # Create engine with appropriate configuration for database type
                 if self.database_url.startswith('sqlite'):
-                    # SQLite configuration - no connection pooling, thread safety enabled
+                    # Optimized SQLite configuration for stability
                     self.engine = create_engine(
                         self.database_url,
                         poolclass=StaticPool,  # Use StaticPool for SQLite
                         connect_args={
                             "check_same_thread": False,  # Allow SQLite to be used across threads
-                            "timeout": 20  # Connection timeout
+                            "timeout": 60,  # Increased timeout to reduce false failures
+                            "isolation_level": None,  # Autocommit mode for better concurrency
+                            "journal_mode": "WAL",  # Write-Ahead Logging for better concurrency
+                            "synchronous": "NORMAL",  # Balanced safety/performance
+                            "cache_size": -64000,  # 64MB cache for better performance
+                            "temp_store": "memory"  # Use memory for temp tables
                         },
-                        pool_pre_ping=True,  # Validate connections before use
+                        pool_pre_ping=False,  # Disabled for SQLite - causes unnecessary overhead
                         echo=False  # Set to True for SQL debugging
                     )
-                    logger.info("Created SQLite engine with StaticPool and thread safety")
+                    logger.info("Created optimized SQLite engine with enhanced configuration")
                 else:
                     # PostgreSQL configuration - full connection pooling
                     self.engine = create_engine(
@@ -344,6 +359,82 @@ class DatabaseManager:
             logger.debug(f"Database connection test failed: {e}")
             return False
 
+    def _test_connection_with_retry(self, max_retries: int = 3) -> bool:
+        """Test database connection with retry logic for transient failures."""
+        for attempt in range(max_retries):
+            try:
+                if self._test_connection():
+                    return True
+
+                if attempt < max_retries - 1:
+                    # Short wait between retries for transient issues
+                    time.sleep(1.0)
+                    logger.debug(f"Health check retry {attempt + 1}/{max_retries}")
+
+            except Exception as e:
+                logger.debug(f"Health check attempt {attempt + 1} failed: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(1.0)
+
+        return False
+
+    def _should_restart_database(self) -> bool:
+        """Determine if database should be restarted based on intelligent criteria."""
+        current_time = datetime.now()
+
+        # Check failure threshold
+        if self.health_check_consecutive_failures < self.health_check_failure_threshold:
+            return False
+
+        # Check restart cooldown
+        if (self.last_restart_time and
+            current_time - self.last_restart_time < timedelta(seconds=self.restart_cooldown)):
+            logger.info("Database restart skipped due to cooldown period")
+            return False
+
+        # Check grace period for new installations
+        if (self.last_successful_health_check and
+            current_time - self.last_successful_health_check < timedelta(seconds=self.health_check_grace_period)):
+            logger.info("Database restart skipped due to grace period")
+            return False
+
+        return True
+
+    def _restart_database_safely(self):
+        """Safely restart database with proper coordination."""
+        try:
+            logger.info("Initiating safe database restart...")
+            self.last_restart_time = datetime.now()
+
+            # Wait for active transactions to complete
+            self._wait_for_active_transactions()
+
+            # Reinitialize engine
+            self._reinitialize_engine()
+
+            # Reset failure counter
+            self.health_check_consecutive_failures = 0
+
+            logger.info("Database restart completed successfully")
+
+        except Exception as e:
+            logger.error(f"Error during safe database restart: {e}")
+
+    def _wait_for_active_transactions(self, max_wait: int = 30):
+        """Wait for active transactions to complete before restart."""
+        start_time = time.time()
+
+        while time.time() - start_time < max_wait:
+            with self.lock:
+                if self.stats.active_connections == 0:
+                    logger.info("All active transactions completed")
+                    return
+
+            logger.info(f"Waiting for {self.stats.active_connections} active transactions to complete...")
+            time.sleep(1.0)
+
+        logger.warning(f"Timeout waiting for transactions, proceeding with restart")
+
     def _test_session_health(self, session: Session) -> bool:
         """Test session health."""
         try:
@@ -355,7 +446,7 @@ class DatabaseManager:
             return False
 
     def _health_monitor_loop(self):
-        """Health monitoring loop."""
+        """Improved health monitoring with grace periods and intelligent restart logic."""
         while self.monitoring_enabled:
             try:
                 current_time = datetime.now()
@@ -364,19 +455,35 @@ class DatabaseManager:
                 if (not self.last_health_check or
                     current_time - self.last_health_check >= timedelta(seconds=self.health_check_interval)):
 
-                    self.is_healthy = self._test_connection()
+                    # Perform health check with retry
+                    is_healthy = self._test_connection_with_retry()
                     self.last_health_check = current_time
 
-                    if not self.is_healthy:
-                        logger.warning("Database health check failed")
-                        # Try to reinitialize if unhealthy
-                        self._reinitialize_engine()
+                    if is_healthy:
+                        # Reset failure counter on success
+                        self.health_check_consecutive_failures = 0
+                        self.last_successful_health_check = current_time
+                        self.is_healthy = True
+                        logger.debug("Database health check passed")
+                    else:
+                        # Increment failure counter
+                        self.health_check_consecutive_failures += 1
+                        logger.warning(f"Database health check failed (failure {self.health_check_consecutive_failures}/{self.health_check_failure_threshold})")
 
-                time.sleep(5.0)  # Check every 5 seconds
+                        # Check if we should restart
+                        if self._should_restart_database():
+                            logger.warning("Database restart conditions met, initiating safe restart")
+                            self._restart_database_safely()
+                        else:
+                            # Mark as unhealthy but don't restart yet
+                            self.is_healthy = False
+
+                # Sleep longer to reduce overhead
+                time.sleep(30.0)  # Increased from 5 seconds to reduce system load
 
             except Exception as e:
                 logger.error(f"Error in database health monitor: {e}")
-                time.sleep(10.0)  # Wait longer on error
+                time.sleep(60.0)  # Wait longer on error
 
     def _reinitialize_engine(self):
         """Reinitialize database engine."""
