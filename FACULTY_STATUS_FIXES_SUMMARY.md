@@ -142,19 +142,90 @@ After these fixes:
 4. **System Stability**: Overall system should be more robust with better error handling and logging
 5. **MQTT Processing**: MQTT message processing should resume normal operation with proper database logging
 
+## CRITICAL MQTT CONNECTIVITY ISSUE IDENTIFIED
+
+### Root Cause: MQTT Broker Connection Failure
+**Analysis**: The logs show no MQTT message processing activity, indicating the MQTT service is not successfully connecting to the broker.
+
+**Evidence**:
+- No MQTT connection logs in the system output
+- No faculty status update messages being processed
+- ESP32 desk units configured for `192.168.1.100` or `172.20.10.8`
+- Central system configured for `localhost` by default
+
+### MQTT Configuration Mismatch
+**Problem**: The central system is trying to connect to `localhost:1883` but the ESP32 desk units are configured to publish to different IP addresses.
+
+**ESP32 Configuration** (from `faculty_desk_unit/config.h`):
+```c
+#define MQTT_SERVER "192.168.1.100"  // or "172.20.10.8"
+#define MQTT_PORT 1883
+```
+
+**Central System Configuration** (default):
+```python
+'mqtt': {
+    'broker_host': 'localhost',  # ❌ MISMATCH!
+    'broker_port': 1883,
+}
+```
+
+## IMMEDIATE FIXES REQUIRED
+
+### Fix 1: Install and Configure MQTT Broker
+```bash
+# Install Mosquitto MQTT broker
+sudo apt update
+sudo apt install mosquitto mosquitto-clients
+
+# Start and enable the service
+sudo systemctl start mosquitto
+sudo systemctl enable mosquitto
+
+# Test the broker
+mosquitto_pub -h localhost -t test/topic -m "test message"
+mosquitto_sub -h localhost -t test/topic
+```
+
+### Fix 2: Configure Central System MQTT Settings
+Create or update `.env` file in the project root:
+```bash
+# MQTT Configuration
+MQTT_BROKER_HOST=192.168.1.100  # Use your actual IP
+MQTT_BROKER_PORT=1883
+MQTT_USERNAME=  # Leave empty if no auth
+MQTT_PASSWORD=  # Leave empty if no auth
+```
+
+### Fix 3: Verify Network Configuration
+```bash
+# Check your actual IP address
+ip addr show
+
+# Test MQTT broker connectivity
+telnet 192.168.1.100 1883
+# or
+nc -zv 192.168.1.100 1883
+```
+
 ## Debugging Steps to Verify Fixes
 
-1. **Check MQTT Service Status**:
-   - Verify MQTT service is connected and running
-   - Check system coordinator logs for service startup issues
+1. **Run MQTT Connection Diagnostic**:
+   ```bash
+   python mqtt_connection_diagnostic.py
+   ```
+
+2. **Check MQTT Service Status**:
+   - Verify MQTT broker is running: `sudo systemctl status mosquitto`
+   - Check MQTT service connection logs
    - Monitor MQTT message handlers registration
 
-2. **Test Faculty Status Updates**:
+3. **Test Faculty Status Updates**:
    - Send test MQTT messages to `consultease/faculty/1/status`
    - Monitor faculty controller logs for message processing
    - Verify database updates are occurring
 
-3. **Monitor Dashboard Updates**:
+4. **Monitor Dashboard Updates**:
    - Check if dashboard MQTT listeners are properly registered
    - Verify real-time faculty status updates without logout/login
    - Test consultation form opening functionality
