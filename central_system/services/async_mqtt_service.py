@@ -77,17 +77,8 @@ class AsyncMQTTService:
         self._initialize_client()
 
     def _initialize_client(self):
-        """Initialize MQTT client with callbacks and improved stability."""
+        """Initialize MQTT client with callbacks."""
         try:
-            # Clean up existing client if any
-            if self.client:
-                try:
-                    self.client.loop_stop()
-                    self.client.disconnect()
-                except:
-                    pass
-                self.client = None
-
             self.client = mqtt.Client()
 
             # Set authentication if provided
@@ -116,27 +107,18 @@ class AsyncMQTTService:
         if rc == 0:
             self.is_connected = True
             self.last_ping = time.time()
-            logger.info(f"✅ MQTT CONNECTED to broker at {self.broker_host}:{self.broker_port}")
+            logger.info(f"Connected to MQTT broker at {self.broker_host}:{self.broker_port}")
 
             # Resubscribe to all topics
-            logger.info(f"📡 Resubscribing to {len(self.message_handlers)} MQTT topics...")
             for topic in self.message_handlers.keys():
                 try:
-                    result = client.subscribe(topic)
-                    logger.info(f"✅ Subscribed to MQTT topic: {topic} (result: {result})")
+                    client.subscribe(topic)
+                    logger.debug(f"Resubscribed to topic: {topic}")
                 except Exception as e:
-                    logger.error(f"❌ Error subscribing to topic {topic}: {e}")
+                    logger.error(f"Error resubscribing to topic {topic}: {e}")
         else:
             self.is_connected = False
-            error_messages = {
-                1: "Connection refused - incorrect protocol version",
-                2: "Connection refused - invalid client identifier",
-                3: "Connection refused - server unavailable",
-                4: "Connection refused - bad username or password",
-                5: "Connection refused - not authorised"
-            }
-            error_msg = error_messages.get(rc, f"Unknown error code: {rc}")
-            logger.error(f"❌ MQTT CONNECTION FAILED to {self.broker_host}:{self.broker_port} - {error_msg}")
+            logger.error(f"Failed to connect to MQTT broker. Return code: {rc}")
 
     def _on_disconnect(self, client, userdata, rc):
         """Handle MQTT disconnection."""
@@ -264,45 +246,26 @@ class AsyncMQTTService:
 
     def connect(self):
         """Connect to MQTT broker asynchronously."""
-        logger.info(f"🔄 Attempting MQTT connection to {self.broker_host}:{self.broker_port}")
-
         if not self.client:
-            logger.info("🔧 Initializing MQTT client...")
             self._initialize_client()
 
         def _connect():
             try:
-                logger.info(f"📡 Connecting to MQTT broker {self.broker_host}:{self.broker_port}...")
-                if self.username:
-                    logger.info(f"🔐 Using authentication with username: {self.username}")
-                else:
-                    logger.info("🔓 Connecting without authentication")
-
                 self.client.connect_async(self.broker_host, self.broker_port, 60)
                 self.client.loop_start()
-                logger.info("✅ MQTT connection initiated successfully")
+                logger.debug("MQTT connection initiated")
             except Exception as e:
-                logger.error(f"❌ Error connecting to MQTT broker: {e}")
+                logger.error(f"Error connecting to MQTT broker: {e}")
                 self.last_error = str(e)
 
         # Execute connection in thread pool
         self.executor.submit(_connect)
 
     def disconnect(self):
-        """Disconnect from MQTT broker safely."""
-        try:
-            if self.client:
-                self.is_connected = False
-                self.client.loop_stop()
-                self.client.disconnect()
-                # Clear the socket reference to prevent AttributeError
-                if hasattr(self.client, '_sock'):
-                    self.client._sock = None
-                logger.info("MQTT client disconnected safely")
-        except Exception as e:
-            logger.error(f"Error during MQTT disconnect: {e}")
-            # Force reset connection state
-            self.is_connected = False
+        """Disconnect from MQTT broker."""
+        if self.client:
+            self.client.loop_stop()
+            self.client.disconnect()
 
     def publish_async(self, topic: str, data: Any, qos: int = 1, retain: bool = False, batch: bool = True):
         """
@@ -475,20 +438,17 @@ class AsyncMQTTService:
             topic: MQTT topic (supports wildcards + and #)
             handler: Callable that takes (topic, data) as arguments
         """
-        logger.info(f"📝 Registering MQTT handler for topic: {topic}")
         self.message_handlers[topic] = handler
 
         # Subscribe to topic if connected
         if self.is_connected and self.client:
             try:
-                result = self.client.subscribe(topic)
-                logger.info(f"✅ Immediately subscribed to topic: {topic} (result: {result})")
+                self.client.subscribe(topic)
+                logger.info(f"Subscribed to topic: {topic}")
             except Exception as e:
-                logger.error(f"❌ Error subscribing to topic {topic}: {e}")
-        else:
-            logger.info(f"⏳ MQTT not connected yet, will subscribe to {topic} when connected")
+                logger.error(f"Error subscribing to topic {topic}: {e}")
 
-        logger.info(f"✅ Handler registered for topic: {topic} (total handlers: {len(self.message_handlers)})")
+        logger.debug(f"Registered handler for topic: {topic}")
 
     def unregister_topic_handler(self, topic: str):
         """Unregister a topic handler."""

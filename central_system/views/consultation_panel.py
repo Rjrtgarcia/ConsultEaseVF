@@ -294,31 +294,18 @@ class ConsultationRequestForm(QFrame):
     def set_faculty_options(self, faculty_list):
         """
         Set the available faculty options in the dropdown.
-        Handles both faculty objects and dictionaries.
         """
         self.faculty_options = faculty_list
         self.faculty_combo.clear()
 
         for faculty in faculty_list:
-            # Handle both faculty objects and dictionaries
-            if isinstance(faculty, dict):
-                faculty_name = faculty.get('name', 'Unknown')
-                faculty_department = faculty.get('department', 'Unknown')
-                faculty_id = faculty.get('id')
-            else:
-                # Legacy support for faculty objects
-                faculty_name = faculty.name
-                faculty_department = faculty.department
-                faculty_id = faculty.id
-
-            self.faculty_combo.addItem(f"{faculty_name} ({faculty_department})", faculty_id)
+            self.faculty_combo.addItem(f"{faculty.name} ({faculty.department})", faculty.id)
 
         # If we have a selected faculty, select it in the dropdown
         if self.faculty:
-            faculty_id_to_find = self.faculty.id if hasattr(self.faculty, 'id') else self.faculty.get('id')
             for i in range(self.faculty_combo.count()):
-                combo_faculty_id = self.faculty_combo.itemData(i)
-                if combo_faculty_id == faculty_id_to_find:
+                faculty_id = self.faculty_combo.itemData(i)
+                if faculty_id == self.faculty.id:
                     self.faculty_combo.setCurrentIndex(i)
                     break
 
@@ -1135,34 +1122,6 @@ class ConsultationPanel(QTabWidget):
                 "No Faculty Available",
                 "There are no faculty members available at this time. Please try again later."
             )
-
-    def set_faculty_safe(self, faculty_data):
-        """
-        Set the faculty for the consultation request using safe dictionary data.
-
-        Args:
-            faculty_data (dict): Faculty data dictionary
-        """
-        # Create a mock faculty object for compatibility
-        class MockFaculty:
-            def __init__(self, data):
-                self.id = data.get('id')
-                self.name = data.get('name', 'Unknown')
-                self.department = data.get('department', 'Unknown')
-                self.status = data.get('status', False)
-                self.email = data.get('email', '')
-
-        mock_faculty = MockFaculty(faculty_data)
-        self.set_faculty(mock_faculty)
-
-    def set_faculty_options_safe(self, faculty_list):
-        """
-        Set the available faculty options using safe dictionary data.
-
-        Args:
-            faculty_list (list): List of faculty data dictionaries
-        """
-        self.set_faculty_options(faculty_list)
 
     def handle_consultation_request(self, faculty, message, course_code):
         """

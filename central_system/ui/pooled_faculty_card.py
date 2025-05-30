@@ -202,17 +202,13 @@ class PooledFacultyCard(QWidget):
             logger.warning("Consultation requested but no faculty ID set")
             return
 
-        # Emit signal with faculty ID
+        # Emit signal
         self.consultation_requested.emit(self.faculty_id)
 
         # Call callback if provided
         if self.consultation_callback:
             try:
-                # Pass the full faculty data if available, otherwise just the ID
-                if hasattr(self, 'faculty_data') and self.faculty_data:
-                    self.consultation_callback(self.faculty_data)
-                else:
-                    self.consultation_callback(self.faculty_id)
+                self.consultation_callback(self.faculty_id)
             except Exception as e:
                 logger.error(f"Error in consultation callback: {e}")
 

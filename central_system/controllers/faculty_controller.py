@@ -1,8 +1,7 @@
 import logging
 import datetime
-import threading
 from sqlalchemy import or_, func
-from ..models import Faculty
+from ..models import Faculty, get_db
 from ..utils.mqtt_utils import publish_faculty_status, subscribe_to_topic, publish_mqtt_message
 from ..utils.mqtt_topics import MQTTTopics
 from ..utils.cache_manager import cached, invalidate_faculty_cache, cache_faculty_list_key, get_cache_manager
@@ -27,50 +26,6 @@ class FacultyController:
         """
         self.callbacks = []
         self.queue_service = get_consultation_queue_service()
-
-        # Thread-safe lock management
-        self._status_locks = {}
-        self._lock_creation_lock = threading.Lock()
-        self._cache_invalidation_lock = threading.Lock()
-
-    def _get_faculty_lock(self, faculty_id):
-        """Get or create a thread-safe lock for faculty status updates."""
-        lock_key = f"faculty_status_{faculty_id}"
-
-        if lock_key not in self._status_locks:
-            with self._lock_creation_lock:
-                # Double-check pattern to prevent race conditions
-                if lock_key not in self._status_locks:
-                    self._status_locks[lock_key] = threading.Lock()
-
-        return self._status_locks[lock_key]
-
-    def _invalidate_caches_atomic(self):
-        """Invalidate caches atomically to prevent race conditions."""
-        try:
-            # Use a lock to ensure atomic cache invalidation
-            with self._cache_invalidation_lock:
-                invalidate_faculty_cache()
-                invalidate_cache_pattern("get_all_faculty")
-                # Clear method-level cache
-                if hasattr(self.get_all_faculty, 'cache_clear'):
-                    self.get_all_faculty.cache_clear()
-        except Exception as e:
-            logger.error(f"Error invalidating caches: {e}")
-
-    def _create_safe_faculty_data(self, faculty):
-        """Create safe faculty data dictionary from faculty object."""
-        return {
-            'id': faculty.id,
-            'name': faculty.name,
-            'department': faculty.department,
-            'status': faculty.status,
-            'always_available': getattr(faculty, 'always_available', False),
-            'last_seen': faculty.last_seen.isoformat() if faculty.last_seen else None,
-            'email': getattr(faculty, 'email', ''),
-            'ble_id': getattr(faculty, 'ble_id', ''),
-            'version': getattr(faculty, 'version', 1)
-        }
 
     def start(self):
         """
@@ -116,19 +71,6 @@ class FacultyController:
             except Exception as e:
                 logger.error(f"Error in Faculty controller callback: {str(e)}")
 
-    def _notify_callbacks_safe(self, faculty_data):
-        """
-        Notify all registered callbacks about faculty status change using safe data.
-
-        Args:
-            faculty_data (dict): Safe faculty data dictionary
-        """
-        for callback in self.callbacks:
-            try:
-                callback(faculty_data)
-            except Exception as e:
-                logger.error(f"Error in Faculty controller callback: {str(e)}")
-
     def handle_faculty_status_update(self, topic, data):
         """
         Handle faculty status update from MQTT.
@@ -165,38 +107,32 @@ class FacultyController:
                         return
 
                     # Update faculty status in database
-                    faculty_data = self.update_faculty_status(faculty_id, status)
+                    faculty = self.update_faculty_status(faculty_id, status)
 
-                    if faculty_data:
+                    if faculty:
                         # Store the detected MAC address if present
                         if detected_mac and status:
                             # Normalize the MAC address
                             normalized_mac = Faculty.normalize_mac_address(detected_mac)
-                            # Get current BLE ID from database to compare
-                            try:
-                                from ..services.database_manager import get_database_manager
-                                db_manager = get_database_manager()
-                                with db_manager.get_session_context() as db:
-                                    faculty = db.query(Faculty).filter(Faculty.id == faculty_id).first()
-                                    if faculty and normalized_mac != faculty.ble_id:
-                                        logger.info(f"Updating faculty {faculty_id} BLE ID from {faculty.ble_id} to {normalized_mac}")
-                                        faculty.ble_id = normalized_mac
-                                        db.commit()
-                            except Exception as e:
-                                logger.error(f"Error updating BLE ID: {e}")
+                            if normalized_mac != faculty.ble_id:
+                                logger.info(f"Updating faculty {faculty_id} BLE ID from {faculty.ble_id} to {normalized_mac}")
+                                # Update the BLE ID with the detected MAC address
+                                db = get_db()
+                                faculty.ble_id = normalized_mac
+                                db.commit()
 
-                        # Notify callbacks with safe data
-                        self._notify_callbacks_safe(faculty_data)
+                        # Notify callbacks
+                        self._notify_callbacks(faculty)
 
                         # Publish notification
                         try:
                             notification = {
                                 'type': 'faculty_mac_status',
-                                'faculty_id': faculty_data['id'],
-                                'faculty_name': faculty_data['name'],
+                                'faculty_id': faculty.id,
+                                'faculty_name': faculty.name,
                                 'status': status,
                                 'detected_mac': detected_mac,
-                                'timestamp': faculty_data.get('last_seen')
+                                'timestamp': faculty.last_seen.isoformat() if faculty.last_seen else None
                             }
                             publish_mqtt_message(MQTTTopics.SYSTEM_NOTIFICATIONS, notification)
                         except Exception as e:
@@ -216,24 +152,31 @@ class FacultyController:
                     status = True
                     # Extract faculty name from client ID (DeskUnit_FacultyName)
                     # This is more flexible than hardcoding a specific faculty name
-                    from ..services.database_manager import get_database_manager
-                    db_manager = get_database_manager()
+                    db = get_db()
 
                     # Try to find the faculty from the MQTT client ID if available
                     # If not available, look for faculty with BLE beacons configured
                     faculty = None
                 elif data == "keychain_disconnected" or data == "faculty_absent":
                     status = False
-                    from ..services.database_manager import get_database_manager
-                    db_manager = get_database_manager()
+                    db = get_db()
                     faculty = None
 
                     # First, try to find any faculty with BLE configured and status=False
                     # This assumes the BLE connection is for a faculty that was previously disconnected
-                    with db_manager.get_session_context() as db:
+                    faculty = db.query(Faculty).filter(
+                        Faculty.ble_id.isnot(None),
+                        Faculty.status == False
+                    ).first()
+
+                    if faculty:
+                        faculty_id = faculty.id
+                        faculty_name = faculty.name
+                        logger.info(f"BLE beacon connected for faculty desk unit (ID: {faculty_id}, Name: {faculty_name})")
+                    else:
+                        # If no disconnected faculty found, look for any faculty with BLE configured
                         faculty = db.query(Faculty).filter(
-                            Faculty.ble_id.isnot(None),
-                            Faculty.status == False
+                            Faculty.ble_id.isnot(None)
                         ).first()
 
                         if faculty:
@@ -241,30 +184,28 @@ class FacultyController:
                             faculty_name = faculty.name
                             logger.info(f"BLE beacon connected for faculty desk unit (ID: {faculty_id}, Name: {faculty_name})")
                         else:
-                            # If no disconnected faculty found, look for any faculty with BLE configured
-                            faculty = db.query(Faculty).filter(
-                                Faculty.ble_id.isnot(None)
-                            ).first()
-
-                            if faculty:
-                                faculty_id = faculty.id
-                                faculty_name = faculty.name
-                                logger.info(f"BLE beacon connected for faculty desk unit (ID: {faculty_id}, Name: {faculty_name})")
-                            else:
-                                logger.error("No faculty with BLE configuration found in database")
-                                return
+                            logger.error("No faculty with BLE configuration found in database")
+                            return
                 elif data == "keychain_disconnected":
                     status = False
                     # Similar approach as above for finding the faculty
-                    from ..services.database_manager import get_database_manager
-                    db_manager = get_database_manager()
+                    db = get_db()
 
                     # First, try to find any faculty with BLE configured and status=True
                     # This assumes the BLE disconnection is for a faculty that was previously connected
-                    with db_manager.get_session_context() as db:
+                    faculty = db.query(Faculty).filter(
+                        Faculty.ble_id.isnot(None),
+                        Faculty.status == True
+                    ).first()
+
+                    if faculty:
+                        faculty_id = faculty.id
+                        faculty_name = faculty.name
+                        logger.info(f"BLE beacon disconnected for faculty desk unit (ID: {faculty_id}, Name: {faculty_name})")
+                    else:
+                        # If no connected faculty found, look for any faculty with BLE configured
                         faculty = db.query(Faculty).filter(
-                            Faculty.ble_id.isnot(None),
-                            Faculty.status == True
+                            Faculty.ble_id.isnot(None)
                         ).first()
 
                         if faculty:
@@ -272,18 +213,8 @@ class FacultyController:
                             faculty_name = faculty.name
                             logger.info(f"BLE beacon disconnected for faculty desk unit (ID: {faculty_id}, Name: {faculty_name})")
                         else:
-                            # If no connected faculty found, look for any faculty with BLE configured
-                            faculty = db.query(Faculty).filter(
-                                Faculty.ble_id.isnot(None)
-                            ).first()
-
-                            if faculty:
-                                faculty_id = faculty.id
-                                faculty_name = faculty.name
-                                logger.info(f"BLE beacon disconnected for faculty desk unit (ID: {faculty_id}, Name: {faculty_name})")
-                            else:
-                                logger.error("No faculty with BLE configuration found in database")
-                                return
+                            logger.error("No faculty with BLE configuration found in database")
+                            return
             else:
                 # This is a JSON message
                 status = data.get('status', False)
@@ -292,30 +223,26 @@ class FacultyController:
 
                 if faculty_id is None and faculty_name is not None:
                     # Try to find faculty by name
-                    from ..services.database_manager import get_database_manager
-                    db_manager = get_database_manager()
-                    with db_manager.get_session_context() as db:
-                        faculty = db.query(Faculty).filter(Faculty.name == faculty_name).first()
-                        if faculty:
-                            faculty_id = faculty.id
-                        else:
-                            logger.error(f"Faculty '{faculty_name}' not found in database")
-                            return
+                    db = get_db()
+                    faculty = db.query(Faculty).filter(Faculty.name == faculty_name).first()
+                    if faculty:
+                        faculty_id = faculty.id
+                    else:
+                        logger.error(f"Faculty '{faculty_name}' not found in database")
+                        return
                 elif faculty_id is None:
                     # No faculty ID or name provided, try to find any faculty with BLE configured
-                    from ..services.database_manager import get_database_manager
-                    db_manager = get_database_manager()
-                    with db_manager.get_session_context() as db:
-                        faculty = db.query(Faculty).filter(
-                            Faculty.ble_id.isnot(None)
-                        ).first()
+                    db = get_db()
+                    faculty = db.query(Faculty).filter(
+                        Faculty.ble_id.isnot(None)
+                    ).first()
 
-                        if faculty:
-                            faculty_id = faculty.id
-                            faculty_name = faculty.name
-                        else:
-                            logger.error("No faculty with BLE configuration found in database")
-                            return
+                    if faculty:
+                        faculty_id = faculty.id
+                        faculty_name = faculty.name
+                    else:
+                        logger.error("No faculty with BLE configuration found in database")
+                        return
         else:
             # Extract faculty ID from topic (e.g., "consultease/faculty/123/status")
             parts = topic.split('/')
@@ -390,10 +317,10 @@ class FacultyController:
 
         # Update faculty status in database
         logger.info(f"💾 Attempting database update for faculty {faculty_id} with status {status}")
-        faculty_data = self.update_faculty_status(faculty_id, status)
+        faculty = self.update_faculty_status(faculty_id, status)
 
-        if faculty_data:
-            logger.info(f"✅ Successfully updated faculty {faculty_data['name']} (ID: {faculty_data['id']}) status to {status}")
+        if faculty:
+            logger.info(f"✅ Successfully updated faculty {faculty.name} (ID: {faculty.id}) status to {status}")
 
             # Verify the update by checking current status
             try:
@@ -410,31 +337,21 @@ class FacultyController:
         else:
             logger.error(f"❌ Failed to update faculty {faculty_id} status in database")
 
-        if faculty_data:
+        if faculty:
             # Notify consultation queue service about faculty status change
             self.queue_service.update_faculty_status(faculty_id, status)
 
-            # Use the safe faculty data dictionary for callbacks
-            try:
-                # Notify callbacks with safe data
-                for callback in self.callbacks:
-                    try:
-                        # Pass the safe data dictionary instead of the faculty object
-                        callback(faculty_data)
-                    except Exception as e:
-                        logger.error(f"Error in Faculty controller callback: {str(e)}")
-
-            except Exception as e:
-                logger.error(f"Error notifying callbacks: {str(e)}")
+            # Notify callbacks
+            self._notify_callbacks(faculty)
 
             # Publish a notification about faculty availability using async MQTT
             try:
                 notification = {
                     'type': 'faculty_status',
-                    'faculty_id': faculty_data['id'],
-                    'faculty_name': faculty_data['name'],
+                    'faculty_id': faculty.id,
+                    'faculty_name': faculty.name,
                     'status': status,
-                    'timestamp': faculty_data.get('last_seen')
+                    'timestamp': faculty.last_seen.isoformat() if faculty.last_seen else None
                 }
                 publish_mqtt_message(MQTTTopics.SYSTEM_NOTIFICATIONS, notification)
             except Exception as e:
@@ -449,17 +366,23 @@ class FacultyController:
             status (bool): New status (True = Available, False = Unavailable)
 
         Returns:
-            dict: Safe faculty data dictionary or None if not found
+            Faculty: Updated faculty object or None if not found
         """
-        # Use thread-safe lock management
-        with self._get_faculty_lock(faculty_id):
+        import threading
+
+        # Use a lock to prevent concurrent status updates for the same faculty
+        lock_key = f"faculty_status_{faculty_id}"
+        if not hasattr(self, '_status_locks'):
+            self._status_locks = {}
+
+        if lock_key not in self._status_locks:
+            self._status_locks[lock_key] = threading.Lock()
+
+        with self._status_locks[lock_key]:
             try:
                 # Use database manager for thread-safe operations
                 from ..services.database_manager import get_database_manager
                 db_manager = get_database_manager()
-
-                faculty_data = None
-                previous_status = None
 
                 with db_manager.get_session_context() as db:
                     # Use SELECT FOR UPDATE to lock the row and prevent concurrent modifications
@@ -472,16 +395,7 @@ class FacultyController:
                     # Check if status actually changed to avoid unnecessary updates
                     if faculty.status == status:
                         logger.debug(f"Faculty {faculty.name} (ID: {faculty.id}) status unchanged: {status}")
-                        # Still create faculty data for consistency
-                        faculty_data = {
-                            'id': faculty.id,
-                            'name': faculty.name,
-                            'department': faculty.department,
-                            'status': faculty.status,
-                            'last_seen': faculty.last_seen.isoformat() if faculty.last_seen else None,
-                            'version': getattr(faculty, 'version', 1)
-                        }
-                        return faculty_data
+                        return faculty
 
                     # Store previous status for logging
                     previous_status = faculty.status
@@ -498,23 +412,24 @@ class FacultyController:
 
                     logger.info(f"Atomically updated status for faculty {faculty.name} (ID: {faculty.id}): {previous_status} -> {status}")
 
-                    # Create safe faculty data before session closes
-                    faculty_data = self._create_safe_faculty_data(faculty)
+                    # Create a safe faculty data dictionary to avoid DetachedInstanceError
+                    faculty_data = {
+                        'id': faculty.id,
+                        'name': faculty.name,
+                        'department': faculty.department,
+                        'status': faculty.status,
+                        'last_seen': faculty.last_seen.isoformat() if faculty.last_seen else None,
+                        'version': getattr(faculty, 'version', 1)
+                    }
 
-                    # Let context manager handle commit automatically
-                    # No manual commit() or refresh() needed
-
-                # Invalidate faculty cache when status changes (after successful transaction)
-                self._invalidate_caches_atomic()
+                # Invalidate faculty cache when status changes (outside transaction)
+                invalidate_faculty_cache()
+                invalidate_cache_pattern("get_all_faculty")
 
                 # Publish MQTT notification with sequence number to ensure ordering
-                if faculty_data and previous_status is not None:
-                    self._publish_status_update_with_sequence_safe(faculty_data, status, previous_status)
+                self._publish_status_update_with_sequence_safe(faculty_data, status, previous_status)
 
-                # Note: Don't call _notify_callbacks here as it's called in handle_faculty_status_update
-                # to avoid duplicate notifications and potential DetachedInstanceError
-
-                return faculty_data
+                return faculty
 
             except Exception as e:
                 logger.error(f"Error updating faculty status atomically: {str(e)}")
@@ -612,7 +527,7 @@ class FacultyController:
 
     def handle_concurrent_status_update(self, faculty_id, status, source="unknown"):
         """
-        Handle concurrent status updates with conflict resolution and database restart protection.
+        Handle concurrent status updates with conflict resolution.
 
         Args:
             faculty_id (int): Faculty ID
@@ -620,54 +535,34 @@ class FacultyController:
             source (str): Source of the update (e.g., "mqtt", "ble", "manual")
 
         Returns:
-            dict: Safe faculty data dictionary or None if failed
+            Faculty: Updated faculty object or None if failed
         """
-        max_retries = 5  # Increased for database restart protection
+        max_retries = 3
         retry_delay = 0.1  # 100ms
 
         for attempt in range(max_retries):
             try:
-                # Check database health before attempting update
-                from ..services.database_manager import get_database_manager
-                db_manager = get_database_manager()
-
-                if not db_manager.is_healthy and attempt == 0:
-                    logger.warning(f"Database unhealthy, waiting for recovery before updating faculty {faculty_id}")
-                    import time
-                    time.sleep(2.0)
-
                 # Attempt atomic update
-                faculty_data = self.update_faculty_status(faculty_id, status)
+                faculty = self.update_faculty_status(faculty_id, status)
 
-                if faculty_data:
+                if faculty:
                     logger.info(f"Successfully updated faculty {faculty_id} status to {status} from {source} (attempt {attempt + 1})")
-                    return faculty_data
+                    return faculty
                 else:
                     logger.warning(f"Failed to update faculty {faculty_id} status (attempt {attempt + 1})")
 
             except Exception as e:
-                # Check if this is a database connection error
-                error_str = str(e).lower()
-                is_db_error = any(keyword in error_str for keyword in [
-                    'database', 'connection', 'timeout', 'operational', 'disconnection'
-                ])
-
-                if is_db_error:
-                    logger.warning(f"Database error updating faculty {faculty_id} (attempt {attempt + 1}): {e}")
-                else:
-                    logger.warning(f"Concurrent update conflict for faculty {faculty_id} (attempt {attempt + 1}): {e}")
+                logger.warning(f"Concurrent update conflict for faculty {faculty_id} (attempt {attempt + 1}): {e}")
 
                 if attempt < max_retries - 1:
                     import time
-                    # Longer wait for database errors
-                    wait_time = (2.0 if is_db_error else retry_delay) * (2 ** attempt)
-                    time.sleep(min(wait_time, 10.0))  # Cap at 10 seconds
+                    time.sleep(retry_delay * (2 ** attempt))  # Exponential backoff
 
         logger.error(f"Failed to update faculty {faculty_id} status after {max_retries} attempts")
         return None
 
     @cached_query(ttl=30)  # Reduced cache time to 30 seconds for more frequent updates
-    def get_all_faculty(self, filter_available=None, search_term=None, page=None, page_size=50, safe_mode=False):
+    def get_all_faculty(self, filter_available=None, search_term=None, page=None, page_size=50):
         """
         Get all faculty, optionally filtered by availability or search term.
         Results are cached for improved performance with optional pagination.
@@ -677,16 +572,13 @@ class FacultyController:
             search_term (str, optional): Search term for name or department
             page (int, optional): Page number for pagination (1-based)
             page_size (int): Number of items per page
-            safe_mode (bool): If True, return safe dictionaries instead of Faculty objects
 
         Returns:
-            list or dict: List of Faculty objects/dictionaries, or paginated results if page is specified
+            list or dict: List of Faculty objects, or paginated results if page is specified
         """
         try:
-            from ..services.database_manager import get_database_manager
-            db_manager = get_database_manager()
-
-            with db_manager.get_session_context() as db:
+            db = get_db(force_new=True)  # Force new session to avoid DetachedInstanceError
+            try:
                 query = db.query(Faculty)
 
                 # Apply filters
@@ -712,35 +604,18 @@ class FacultyController:
                 # For backward compatibility, return all results if no pagination
                 faculties = query.all()
 
-                # If safe_mode is enabled, convert to dictionaries
-                if safe_mode:
-                    safe_faculties = []
-                    for faculty in faculties:
-                        safe_faculty = {
-                            'id': faculty.id,
-                            'name': faculty.name,
-                            'department': faculty.department,
-                            'email': faculty.email,
-                            'ble_id': faculty.ble_id,
-                            'status': faculty.status,
-                            'always_available': getattr(faculty, 'always_available', False),
-                            'last_seen': faculty.last_seen.isoformat() if faculty.last_seen else None,
-                            'image_path': getattr(faculty, 'image_path', None)
-                        }
-                        safe_faculties.append(safe_faculty)
+                # Ensure all attributes are loaded before returning
+                for faculty in faculties:
+                    # Access attributes to ensure they're loaded
+                    _ = faculty.id, faculty.name, faculty.department, faculty.status
+                    _ = getattr(faculty, 'always_available', False)
+                    _ = getattr(faculty, 'email', '')
 
-                    logger.debug(f"Retrieved {len(safe_faculties)} faculty members (safe mode)")
-                    return safe_faculties
-                else:
-                    # Ensure all attributes are loaded before returning
-                    for faculty in faculties:
-                        # Access attributes to ensure they're loaded
-                        _ = faculty.id, faculty.name, faculty.department, faculty.status
-                        _ = getattr(faculty, 'always_available', False)
-                        _ = getattr(faculty, 'email', '')
+                logger.debug(f"Retrieved {len(faculties)} faculty members")
+                return faculties
 
-                    logger.debug(f"Retrieved {len(faculties)} faculty members")
-                    return faculties
+            finally:
+                db.close()
 
         except Exception as e:
             logger.error(f"Error getting faculty list: {str(e)}")
@@ -757,11 +632,9 @@ class FacultyController:
             Faculty: Faculty object or None if not found
         """
         try:
-            from ..services.database_manager import get_database_manager
-            db_manager = get_database_manager()
-            with db_manager.get_session_context() as db:
-                faculty = db.query(Faculty).filter(Faculty.id == faculty_id).first()
-                return faculty
+            db = get_db()
+            faculty = db.query(Faculty).filter(Faculty.id == faculty_id).first()
+            return faculty
         except Exception as e:
             logger.error(f"Error getting faculty by ID: {str(e)}")
             return None
@@ -777,17 +650,15 @@ class FacultyController:
             Faculty: Faculty object or None if not found
         """
         try:
-            from ..services.database_manager import get_database_manager
-            db_manager = get_database_manager()
-            with db_manager.get_session_context() as db:
-                faculty = db.query(Faculty).filter(Faculty.ble_id == ble_id).first()
+            db = get_db()
+            faculty = db.query(Faculty).filter(Faculty.ble_id == ble_id).first()
 
-                if faculty:
-                    logger.info(f"Found faculty with BLE ID {ble_id}: {faculty.name} (ID: {faculty.id})")
-                else:
-                    logger.warning(f"No faculty found with BLE ID: {ble_id}")
+            if faculty:
+                logger.info(f"Found faculty with BLE ID {ble_id}: {faculty.name} (ID: {faculty.id})")
+            else:
+                logger.warning(f"No faculty found with BLE ID: {ble_id}")
 
-                return faculty
+            return faculty
         except Exception as e:
             logger.error(f"Error getting faculty by BLE ID: {str(e)}")
             return None
@@ -859,41 +730,37 @@ class FacultyController:
     def _check_faculty_duplicates(self, email, ble_id):
         """Check for duplicate email or BLE ID."""
         try:
-            from ..services.database_manager import get_database_manager
-            db_manager = get_database_manager()
-            with db_manager.get_session_context() as db:
-                existing = db.query(Faculty).filter(
-                    or_(Faculty.email == email, Faculty.ble_id == ble_id)
-                ).first()
+            db = get_db()
+            existing = db.query(Faculty).filter(
+                or_(Faculty.email == email, Faculty.ble_id == ble_id)
+            ).first()
 
-                if existing:
-                    return f"Faculty with email {email} or BLE ID {ble_id} already exists"
-                return None
+            if existing:
+                return f"Faculty with email {email} or BLE ID {ble_id} already exists"
+            return None
         except Exception as e:
             logger.error(f"Error checking faculty duplicates: {e}")
             return f"Error checking for duplicates: {str(e)}"
 
     def _create_and_save_faculty(self, name, department, email, ble_id, image_path):
         """Create and save new faculty to database."""
-        from ..services.database_manager import get_database_manager
-        db_manager = get_database_manager()
+        db = get_db()
 
-        with db_manager.get_session_context() as db:
-            faculty = Faculty(
-                name=name,
-                department=department,
-                email=email,
-                ble_id=ble_id,
-                image_path=image_path,
-                status=False,  # Initial status is False, will be updated by BLE
-                always_available=False  # Always set to False
-            )
+        faculty = Faculty(
+            name=name,
+            department=department,
+            email=email,
+            ble_id=ble_id,
+            image_path=image_path,
+            status=False,  # Initial status is False, will be updated by BLE
+            always_available=False  # Always set to False
+        )
 
-            db.add(faculty)
-            db.commit()
+        db.add(faculty)
+        db.commit()
 
-            logger.info(f"Added new faculty: {faculty.name} (ID: {faculty.id})")
-            return faculty
+        logger.info(f"Added new faculty: {faculty.name} (ID: {faculty.id})")
+        return faculty
 
     def _handle_faculty_creation_success(self, faculty):
         """Handle post-creation tasks for new faculty."""
@@ -956,30 +823,29 @@ class FacultyController:
                 return
 
             # Update last seen timestamp for the faculty
-            from ..services.database_manager import get_database_manager
-            db_manager = get_database_manager()
+            db = get_db()
             try:
-                with db_manager.get_session_context() as db:
-                    faculty = db.query(Faculty).filter(Faculty.id == faculty_id).first()
-                    if faculty:
-                        faculty.last_seen = datetime.datetime.now()
-                        db.commit()
+                faculty = db.query(Faculty).filter(Faculty.id == faculty_id).first()
+                if faculty:
+                    faculty.last_seen = datetime.datetime.now()
+                    db.commit()
 
-                        # Log important status changes
-                        if 'ntp_sync_status' in heartbeat_data:
-                            ntp_status = heartbeat_data['ntp_sync_status']
-                            if ntp_status == 'FAILED':
-                                logger.warning(f"Faculty {faculty_id} ({faculty.name}) NTP sync failed")
-                            elif ntp_status == 'SYNCED':
-                                logger.debug(f"Faculty {faculty_id} ({faculty.name}) NTP synced")
+                    # Log important status changes
+                    if 'ntp_sync_status' in heartbeat_data:
+                        ntp_status = heartbeat_data['ntp_sync_status']
+                        if ntp_status == 'FAILED':
+                            logger.warning(f"Faculty {faculty_id} ({faculty.name}) NTP sync failed")
+                        elif ntp_status == 'SYNCED':
+                            logger.debug(f"Faculty {faculty_id} ({faculty.name}) NTP synced")
 
-                        # Monitor system health
-                        if 'free_heap' in heartbeat_data:
-                            free_heap = heartbeat_data.get('free_heap', 0)
-                            if free_heap < 50000:  # Less than 50KB free
-                                logger.warning(f"Faculty {faculty_id} ({faculty.name}) low memory: {free_heap} bytes")
-            except Exception as e:
-                logger.error(f"Error updating faculty heartbeat: {e}")
+                    # Monitor system health
+                    if 'free_heap' in heartbeat_data:
+                        free_heap = heartbeat_data.get('free_heap', 0)
+                        if free_heap < 50000:  # Less than 50KB free
+                            logger.warning(f"Faculty {faculty_id} ({faculty.name}) low memory: {free_heap} bytes")
+
+            finally:
+                db.close()
 
         except Exception as e:
             logger.debug(f"Error processing faculty heartbeat: {str(e)}")
@@ -1037,60 +903,58 @@ class FacultyController:
             Faculty: Updated faculty object or None if error
         """
         try:
-            from ..services.database_manager import get_database_manager
-            db_manager = get_database_manager()
-            with db_manager.get_session_context() as db:
-                faculty = db.query(Faculty).filter(Faculty.id == faculty_id).first()
+            db = get_db()
+            faculty = db.query(Faculty).filter(Faculty.id == faculty_id).first()
 
-                if not faculty:
-                    logger.error(f"Faculty not found: {faculty_id}")
+            if not faculty:
+                logger.error(f"Faculty not found: {faculty_id}")
+                return None
+
+            # Update fields if provided
+            if name is not None:
+                faculty.name = name
+
+            if department is not None:
+                faculty.department = department
+
+            if email is not None and email != faculty.email:
+                # Check if email already exists
+                existing = db.query(Faculty).filter(Faculty.email == email).first()
+                if existing and existing.id != faculty_id:
+                    logger.error(f"Faculty with email {email} already exists")
                     return None
+                faculty.email = email
 
-                # Update fields if provided
-                if name is not None:
-                    faculty.name = name
+            if ble_id is not None and ble_id != faculty.ble_id:
+                # Check if BLE ID already exists
+                existing = db.query(Faculty).filter(Faculty.ble_id == ble_id).first()
+                if existing and existing.id != faculty_id:
+                    logger.error(f"Faculty with BLE ID {ble_id} already exists")
+                    return None
+                faculty.ble_id = ble_id
 
-                if department is not None:
-                    faculty.department = department
+            if image_path is not None:
+                faculty.image_path = image_path
 
-                if email is not None and email != faculty.email:
-                    # Check if email already exists
-                    existing = db.query(Faculty).filter(Faculty.email == email).first()
-                    if existing and existing.id != faculty_id:
-                        logger.error(f"Faculty with email {email} already exists")
-                        return None
-                    faculty.email = email
+            # Set always_available to False regardless of input
+            # Status is always determined by BLE connection
+            if faculty.always_available:
+                faculty.always_available = False
+                logger.info(f"Faculty {faculty.name} (ID: {faculty.id}) status will be determined by BLE connection")
 
-                if ble_id is not None and ble_id != faculty.ble_id:
-                    # Check if BLE ID already exists
-                    existing = db.query(Faculty).filter(Faculty.ble_id == ble_id).first()
-                    if existing and existing.id != faculty_id:
-                        logger.error(f"Faculty with BLE ID {ble_id} already exists")
-                        return None
-                    faculty.ble_id = ble_id
+            db.commit()
 
-                if image_path is not None:
-                    faculty.image_path = image_path
+            logger.info(f"Updated faculty: {faculty.name} (ID: {faculty.id})")
 
-                # Set always_available to False regardless of input
-                # Status is always determined by BLE connection
-                if faculty.always_available:
-                    faculty.always_available = False
-                    logger.info(f"Faculty {faculty.name} (ID: {faculty.id}) status will be determined by BLE connection")
+            # Invalidate faculty cache
+            invalidate_faculty_cache()
+            invalidate_cache_pattern("get_all_faculty")
 
-                db.commit()
+            # Clear method-level cache if it exists
+            if hasattr(self.get_all_faculty, 'cache_clear'):
+                self.get_all_faculty.cache_clear()
 
-                logger.info(f"Updated faculty: {faculty.name} (ID: {faculty.id})")
-
-                # Invalidate faculty cache
-                invalidate_faculty_cache()
-                invalidate_cache_pattern("get_all_faculty")
-
-                # Clear method-level cache if it exists
-                if hasattr(self.get_all_faculty, 'cache_clear'):
-                    self.get_all_faculty.cache_clear()
-
-                return faculty
+            return faculty
         except Exception as e:
             logger.error(f"Error updating faculty: {str(e)}")
             return None
@@ -1107,41 +971,40 @@ class FacultyController:
             bool: True if successful, False otherwise
         """
         try:
-            from ..services.database_manager import get_database_manager
-            db_manager = get_database_manager()
-            with db_manager.get_session_context() as db:
-                faculty = db.query(Faculty).filter(Faculty.id == faculty_id).first()
+            db = get_db()
+            faculty = db.query(Faculty).filter(Faculty.id == faculty_id).first()
 
-                if not faculty:
-                    logger.error(f"Faculty with ID {faculty_id} not found")
+            if not faculty:
+                logger.error(f"Faculty with ID {faculty_id} not found")
+                return False
+
+            # Validate BLE ID format
+            if ble_id and not Faculty.validate_ble_id(ble_id):
+                logger.error(f"Invalid BLE ID format: {ble_id}")
+                return False
+
+            # Check if BLE ID is already in use by another faculty
+            if ble_id:
+                existing = db.query(Faculty).filter(
+                    Faculty.ble_id == ble_id,
+                    Faculty.id != faculty_id
+                ).first()
+
+                if existing:
+                    logger.error(f"BLE ID {ble_id} is already in use by faculty {existing.name}")
                     return False
 
-                # Validate BLE ID format
-                if ble_id and not Faculty.validate_ble_id(ble_id):
-                    logger.error(f"Invalid BLE ID format: {ble_id}")
-                    return False
+            # Update BLE ID
+            faculty.ble_id = ble_id
+            faculty.updated_at = func.now()
+            db.commit()
 
-                # Check if BLE ID is already in use by another faculty
-                if ble_id:
-                    existing = db.query(Faculty).filter(
-                        Faculty.ble_id == ble_id,
-                        Faculty.id != faculty_id
-                    ).first()
-
-                    if existing:
-                        logger.error(f"BLE ID {ble_id} is already in use by faculty {existing.name}")
-                        return False
-
-                # Update BLE ID
-                faculty.ble_id = ble_id
-                faculty.updated_at = func.now()
-                db.commit()
-
-                logger.info(f"Updated BLE ID for faculty {faculty.name} (ID: {faculty_id}) to {ble_id}")
-                return True
+            logger.info(f"Updated BLE ID for faculty {faculty.name} (ID: {faculty_id}) to {ble_id}")
+            return True
 
         except Exception as e:
             logger.error(f"Error updating faculty BLE ID: {str(e)}")
+            db.rollback()
             return False
 
     def delete_faculty(self, faculty_id):
@@ -1155,32 +1018,27 @@ class FacultyController:
             bool: True if successful, False otherwise
         """
         try:
-            from ..services.database_manager import get_database_manager
-            db_manager = get_database_manager()
-            with db_manager.get_session_context() as db:
-                faculty = db.query(Faculty).filter(Faculty.id == faculty_id).first()
+            db = get_db()
+            faculty = db.query(Faculty).filter(Faculty.id == faculty_id).first()
 
-                if not faculty:
-                    logger.error(f"Faculty not found: {faculty_id}")
-                    return False
+            if not faculty:
+                logger.error(f"Faculty not found: {faculty_id}")
+                return False
 
-                faculty_name = faculty.name
-                faculty_id_for_log = faculty.id
+            db.delete(faculty)
+            db.commit()
 
-                db.delete(faculty)
-                db.commit()
+            logger.info(f"Deleted faculty: {faculty.name} (ID: {faculty.id})")
 
-                logger.info(f"Deleted faculty: {faculty_name} (ID: {faculty_id_for_log})")
+            # Invalidate faculty cache
+            invalidate_faculty_cache()
+            invalidate_cache_pattern("get_all_faculty")
 
-                # Invalidate faculty cache
-                invalidate_faculty_cache()
-                invalidate_cache_pattern("get_all_faculty")
+            # Clear method-level cache if it exists
+            if hasattr(self.get_all_faculty, 'cache_clear'):
+                self.get_all_faculty.cache_clear()
 
-                # Clear method-level cache if it exists
-                if hasattr(self.get_all_faculty, 'cache_clear'):
-                    self.get_all_faculty.cache_clear()
-
-                return True
+            return True
         except Exception as e:
             logger.error(f"Error deleting faculty: {str(e)}")
             return False
@@ -1194,36 +1052,35 @@ class FacultyController:
             Faculty: The available faculty member or None if error
         """
         try:
-            from ..services.database_manager import get_database_manager
-            db_manager = get_database_manager()
-            with db_manager.get_session_context() as db:
-                # Check if any faculty is available
-                available_faculty = db.query(Faculty).filter(Faculty.status == True).first()
+            db = get_db()
 
-                if available_faculty:
-                    logger.info(f"Found available faculty: {available_faculty.name} (ID: {available_faculty.id})")
-                    return available_faculty
+            # Check if any faculty is available
+            available_faculty = db.query(Faculty).filter(Faculty.status == True).first()
 
-                # If no faculty is available, make Dr. John Smith available
-                dr_john = db.query(Faculty).filter(Faculty.name == "Dr. John Smith").first()
+            if available_faculty:
+                logger.info(f"Found available faculty: {available_faculty.name} (ID: {available_faculty.id})")
+                return available_faculty
 
-                if dr_john:
-                    logger.info(f"Making Dr. John Smith (ID: {dr_john.id}) available for testing")
-                    dr_john.status = True
-                    db.commit()
-                    return dr_john
+            # If no faculty is available, make Dr. John Smith available
+            dr_john = db.query(Faculty).filter(Faculty.name == "Dr. John Smith").first()
 
-                # If Dr. John Smith doesn't exist, make the first faculty available
-                first_faculty = db.query(Faculty).first()
+            if dr_john:
+                logger.info(f"Making Dr. John Smith (ID: {dr_john.id}) available for testing")
+                dr_john.status = True
+                db.commit()
+                return dr_john
 
-                if first_faculty:
-                    logger.info(f"Making {first_faculty.name} (ID: {first_faculty.id}) available for testing")
-                    first_faculty.status = True
-                    db.commit()
-                    return first_faculty
+            # If Dr. John Smith doesn't exist, make the first faculty available
+            first_faculty = db.query(Faculty).first()
 
-                logger.warning("No faculty found in the database")
-                return None
+            if first_faculty:
+                logger.info(f"Making {first_faculty.name} (ID: {first_faculty.id}) available for testing")
+                first_faculty.status = True
+                db.commit()
+                return first_faculty
+
+            logger.warning("No faculty found in the database")
+            return None
         except Exception as e:
             logger.error(f"Error ensuring available faculty: {str(e)}")
             return None

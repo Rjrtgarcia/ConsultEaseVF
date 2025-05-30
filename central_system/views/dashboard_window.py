@@ -222,10 +222,9 @@ class DashboardWindow(BaseWindow):
 
         # Set up smart refresh manager for optimized faculty status updates
         self.smart_refresh = SmartRefreshManager(base_interval=180000, max_interval=600000)
-
-        # Initialize timer in main thread to avoid Qt threading issues
-        self.refresh_timer = None
-        self._setup_refresh_timer()
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.timeout.connect(self.refresh_faculty_status)
+        self.refresh_timer.start(180000)  # Start with 3 minutes
 
         # UI performance utilities
         self.ui_batcher = get_ui_batcher()
@@ -240,12 +239,6 @@ class DashboardWindow(BaseWindow):
         # Loading state management
         self._is_loading = False
         self._loading_widget = None
-
-        # Set up MQTT status update listeners for real-time updates
-        self._setup_mqtt_listeners()
-
-        # Setup refresh timer after MQTT listeners
-        self._setup_refresh_timer()
 
         # Log student info for debugging
         if student:
@@ -262,59 +255,6 @@ class DashboardWindow(BaseWindow):
             logger.info(f"Dashboard initialized with student: ID={student_id}, Name={student_name}, RFID={student_rfid}")
         else:
             logger.warning("Dashboard initialized without student information")
-
-    def _setup_mqtt_listeners(self):
-        """
-        Set up MQTT listeners for real-time faculty status updates.
-        """
-        try:
-            from ..utils.mqtt_utils import subscribe_to_topic
-            from ..utils.mqtt_topics import MQTTTopics
-
-            # Subscribe to faculty status updates
-            subscribe_to_topic("consultease/faculty/+/status", self._handle_faculty_status_update)
-            subscribe_to_topic(MQTTTopics.SYSTEM_NOTIFICATIONS, self._handle_system_notification)
-
-            logger.info("Dashboard MQTT listeners set up successfully")
-        except Exception as e:
-            logger.error(f"Error setting up MQTT listeners: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-
-    def _handle_faculty_status_update(self, topic, data):
-        """
-        Handle faculty status updates from MQTT.
-
-        Args:
-            topic (str): MQTT topic
-            data (dict): Status update data
-        """
-        try:
-            logger.debug(f"Dashboard received faculty status update: {topic} -> {data}")
-
-            # Trigger a refresh of the faculty grid
-            QTimer.singleShot(500, self.refresh_faculty_status)  # Small delay to batch updates
-
-        except Exception as e:
-            logger.error(f"Error handling faculty status update in dashboard: {e}")
-
-    def _handle_system_notification(self, topic, data):
-        """
-        Handle system notifications from MQTT.
-
-        Args:
-            topic (str): MQTT topic
-            data (dict): Notification data
-        """
-        try:
-            if isinstance(data, dict) and data.get('type') == 'faculty_status':
-                logger.debug(f"Dashboard received system notification: {data}")
-
-                # Trigger a refresh of the faculty grid
-                QTimer.singleShot(500, self.refresh_faculty_status)  # Small delay to batch updates
-
-        except Exception as e:
-            logger.error(f"Error handling system notification in dashboard: {e}")
 
     def init_ui(self):
         """
@@ -565,37 +505,6 @@ class DashboardWindow(BaseWindow):
         central_widget.setLayout(main_layout)
         self.setCentralWidget(central_widget)
 
-    def _setup_refresh_timer(self):
-        """Setup refresh timer in main thread to avoid Qt threading issues."""
-        try:
-            from PyQt5.QtCore import QThread
-
-            # Only create timer if we're in the main thread
-            if QThread.currentThread() == QApplication.instance().thread():
-                if not self.refresh_timer:
-                    self.refresh_timer = QTimer(self)
-                    self.refresh_timer.timeout.connect(self.refresh_faculty_status)
-                    self.refresh_timer.start(180000)  # Start with 3 minutes
-                    logger.debug("Refresh timer setup successfully in main thread")
-            else:
-                logger.warning("Cannot setup refresh timer - not in main thread")
-                # Schedule timer setup in main thread
-                from PyQt5.QtCore import QMetaObject, Qt
-                QMetaObject.invokeMethod(self, "_setup_refresh_timer_delayed", Qt.QueuedConnection)
-        except Exception as e:
-            logger.error(f"Error setting up refresh timer: {e}")
-
-    def _setup_refresh_timer_delayed(self):
-        """Delayed timer setup for when called from non-main thread."""
-        try:
-            if not self.refresh_timer:
-                self.refresh_timer = QTimer(self)
-                self.refresh_timer.timeout.connect(self.refresh_faculty_status)
-                self.refresh_timer.start(180000)
-                logger.debug("Delayed refresh timer setup completed")
-        except Exception as e:
-            logger.error(f"Error in delayed refresh timer setup: {e}")
-
     def populate_faculty_grid_safe(self, faculty_data_list):
         """
         Populate the faculty grid with safe faculty data (no SQLAlchemy objects).
@@ -703,71 +612,23 @@ class DashboardWindow(BaseWindow):
         Show consultation form using safe faculty data dictionary.
 
         Args:
-            faculty_data (dict or int): Faculty data dictionary or faculty ID
+            faculty_data (dict): Faculty data dictionary
         """
         try:
-            # Handle case where faculty_data is passed as an integer (faculty ID)
-            if isinstance(faculty_data, int):
-                logger.warning(f"Faculty data passed as integer {faculty_data}, attempting to fetch faculty data")
-                # Try to get faculty data from controller
-                from ..controllers import FacultyController
-                faculty_controller = FacultyController()
-                faculty = faculty_controller.get_faculty_by_id(faculty_data)
-                if faculty:
-                    # Convert to dictionary format
-                    faculty_data = {
-                        'id': faculty.id,
-                        'name': faculty.name,
-                        'department': faculty.department,
-                        'status': faculty.status,
-                        'email': getattr(faculty, 'email', ''),
-                        'room': getattr(faculty, 'room', None)
-                    }
-                else:
-                    logger.error(f"Faculty with ID {faculty_data} not found")
-                    self.show_notification(f"Faculty with ID {faculty_data} not found", "error")
-                    return
-
-            # Validate that faculty_data is now a dictionary
-            if not isinstance(faculty_data, dict):
-                logger.error(f"Invalid faculty data type: {type(faculty_data)}, expected dict")
-                self.show_notification("Invalid faculty data", "error")
-                return
-
-            # Validate required fields
-            required_fields = ['id', 'name', 'department']
-            for field in required_fields:
-                if field not in faculty_data:
-                    logger.error(f"Missing required field '{field}' in faculty data: {faculty_data}")
-                    self.show_notification(f"Missing faculty information: {field}", "error")
-                    return
-
             # Create a mock faculty object for compatibility
             class MockFaculty:
                 def __init__(self, data):
                     self.id = data['id']
                     self.name = data['name']
                     self.department = data['department']
-                    self.status = data.get('status', False)
+                    self.status = data['status']
                     self.email = data.get('email', '')
                     self.room = data.get('room', None)
 
             mock_faculty = MockFaculty(faculty_data)
             self.show_consultation_form(mock_faculty)
-
         except Exception as e:
-            logger.error(f"Error showing consultation form for faculty {faculty_data}: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-
-            # Try to get faculty name for error message
-            faculty_name = "Unknown"
-            if isinstance(faculty_data, dict):
-                faculty_name = faculty_data.get('name', 'Unknown')
-            elif isinstance(faculty_data, int):
-                faculty_name = f"ID {faculty_data}"
-
-            self.show_notification(f"Error opening consultation form for {faculty_name}", "error")
+            logger.error(f"Error showing consultation form for faculty {faculty_data.get('name', 'Unknown')}: {e}")
 
     def _extract_safe_faculty_data(self, faculty_data_list):
         """
@@ -794,23 +655,17 @@ class DashboardWindow(BaseWindow):
         Optimized for performance with batch processing and reduced UI updates.
 
         Args:
-            faculties (list): List of faculty objects or dictionaries
+            faculties (list): List of faculty objects
         """
         # Log faculty data for debugging
         logger.info(f"Populating faculty grid with {len(faculties) if faculties else 0} faculty members")
         if faculties:
             for faculty in faculties:
                 try:
-                    # Handle both faculty objects and dictionaries
-                    if isinstance(faculty, dict):
-                        faculty_name = faculty.get('name', 'Unknown')
-                        faculty_status = faculty.get('status', False)
-                        faculty_always_available = faculty.get('always_available', False)
-                    else:
-                        # Access attributes safely to avoid DetachedInstanceError
-                        faculty_name = faculty.name
-                        faculty_status = faculty.status
-                        faculty_always_available = getattr(faculty, 'always_available', False)
+                    # Access attributes safely to avoid DetachedInstanceError
+                    faculty_name = faculty.name
+                    faculty_status = faculty.status
+                    faculty_always_available = getattr(faculty, 'always_available', False)
                     logger.debug(f"Faculty: {faculty_name}, Status: {faculty_status}, Always Available: {faculty_always_available}")
                 except Exception as e:
                     logger.warning(f"Error accessing faculty attributes: {e}")
@@ -870,50 +725,37 @@ class DashboardWindow(BaseWindow):
                     container_layout.setContentsMargins(0, 0, 0, 0)
                     container_layout.setAlignment(Qt.AlignCenter)
 
-                    # Handle both faculty objects and dictionaries
-                    if isinstance(faculty, dict):
-                        # Faculty is already a dictionary
-                        faculty_data = {
-                            'id': faculty.get('id'),
-                            'name': faculty.get('name', 'Unknown'),
-                            'department': faculty.get('department', ''),
-                            'available': faculty.get('status', False) or faculty.get('always_available', False),
-                            'status': 'Available' if (faculty.get('status', False) or faculty.get('always_available', False)) else 'Unavailable',
-                            'email': faculty.get('email', ''),
-                            'room': faculty.get('room', None)
-                        }
-                    else:
-                        # Convert faculty object to dictionary format expected by FacultyCard
-                        # Access all attributes at once to avoid DetachedInstanceError
-                        faculty_id = faculty.id
-                        faculty_name = faculty.name
-                        faculty_department = faculty.department
-                        faculty_status = faculty.status
-                        faculty_always_available = getattr(faculty, 'always_available', False)
-                        faculty_email = getattr(faculty, 'email', '')
-                        faculty_room = getattr(faculty, 'room', None)
+                    # Convert faculty object to dictionary format expected by FacultyCard
+                    # Access all attributes at once to avoid DetachedInstanceError
+                    faculty_id = faculty.id
+                    faculty_name = faculty.name
+                    faculty_department = faculty.department
+                    faculty_status = faculty.status
+                    faculty_always_available = getattr(faculty, 'always_available', False)
+                    faculty_email = getattr(faculty, 'email', '')
+                    faculty_room = getattr(faculty, 'room', None)
 
-                        faculty_data = {
-                            'id': faculty_id,
-                            'name': faculty_name,
-                            'department': faculty_department,
-                            'available': faculty_status or faculty_always_available,  # Show if available OR always available
-                            'status': 'Available' if (faculty_status or faculty_always_available) else 'Unavailable',
-                            'email': faculty_email,
-                            'room': faculty_room
-                        }
+                    faculty_data = {
+                        'id': faculty_id,
+                        'name': faculty_name,
+                        'department': faculty_department,
+                        'available': faculty_status or faculty_always_available,  # Show if available OR always available
+                        'status': 'Available' if (faculty_status or faculty_always_available) else 'Unavailable',
+                        'email': faculty_email,
+                        'room': faculty_room
+                    }
 
-                    logger.debug(f"Creating card for faculty {faculty_data['name']}: available={faculty_data['available']}, status={faculty_data['status']}")
+                    logger.debug(f"Creating card for faculty {faculty.name}: available={faculty_data['available']}, status={faculty_data['status']}")
 
-                    # Get pooled faculty card - use faculty_data instead of faculty object
+                    # Get pooled faculty card
                     card = self.faculty_card_manager.get_faculty_card(
                         faculty_data,
-                        consultation_callback=lambda f_data=faculty_data: self.show_consultation_form_safe(f_data)
+                        consultation_callback=lambda f=faculty: self.show_consultation_form(f)
                     )
 
                     # Connect consultation signal if it exists
                     if hasattr(card, 'consultation_requested'):
-                        card.consultation_requested.connect(lambda f_data=faculty_data: self.show_consultation_form_safe(f_data))
+                        card.consultation_requested.connect(lambda f=faculty: self.show_consultation_form(f))
 
                     # Add card to container
                     container_layout.addWidget(card)
@@ -926,11 +768,10 @@ class DashboardWindow(BaseWindow):
                         col = 0
                         row += 1
 
-                    logger.debug(f"Successfully created card for faculty {faculty_data['name']}")
+                    logger.debug(f"Successfully created card for faculty {faculty.name}")
 
                 except Exception as e:
-                    faculty_name = faculty_data.get('name', 'Unknown') if 'faculty_data' in locals() else 'Unknown'
-                    logger.error(f"Error creating faculty card for {faculty_name}: {e}")
+                    logger.error(f"Error creating faculty card for {faculty.name}: {e}")
                     continue
 
             # Now add all containers to the grid at once
@@ -939,117 +780,6 @@ class DashboardWindow(BaseWindow):
 
             # Log successful population
             logger.info(f"Successfully populated faculty grid with {len(containers)} faculty cards")
-
-        finally:
-            # Re-enable updates after all changes are made
-            self.setUpdatesEnabled(True)
-
-    def populate_faculty_grid_safe(self, faculty_data_list):
-        """
-        Populate the faculty grid with faculty cards using safe dictionary data.
-        This method is specifically designed to work with dictionary data to avoid
-        SQLAlchemy session binding issues.
-
-        Args:
-            faculty_data_list (list): List of faculty dictionaries
-        """
-        logger.info(f"Populating faculty grid with {len(faculty_data_list)} faculty members (safe mode)")
-
-        # Temporarily disable updates to reduce flickering and improve performance
-        self.setUpdatesEnabled(False)
-
-        try:
-            # Clear existing grid efficiently using pooled cards
-            self._clear_faculty_grid_pooled()
-
-            # Handle empty faculty list
-            if not faculty_data_list:
-                logger.info("No faculty members found - showing empty state message")
-                self._show_empty_faculty_message()
-                return
-
-            # Calculate optimal number of columns based on screen width
-            screen_width = QApplication.desktop().screenGeometry().width()
-            card_width = 280  # Fixed card width
-            spacing = 15  # Grid spacing
-
-            # Get the actual width of the faculty grid container
-            grid_container_width = self.faculty_grid.parentWidget().width()
-            if grid_container_width <= 0:  # If not yet available, estimate based on screen
-                grid_container_width = int(screen_width * 0.6)  # 60% of screen for faculty grid
-
-            # Account for grid margins
-            grid_container_width -= 30  # 15px left + 15px right margin
-
-            # Calculate how many cards can fit in a row, accounting for spacing
-            max_cols = max(1, int(grid_container_width / (card_width + spacing)))
-
-            # Adjust for very small screens
-            if screen_width < 800:
-                max_cols = 1  # Force single column on very small screens
-
-            # Add faculty cards to grid with centering containers
-            row, col = 0, 0
-            containers = []
-
-            logger.info(f"Creating faculty cards for {len(faculty_data_list)} faculty members (safe mode)")
-
-            for faculty_data in faculty_data_list:
-                try:
-                    # Create a container widget to center the card
-                    container = QWidget()
-                    container.setStyleSheet("background-color: transparent;")
-                    container_layout = QHBoxLayout(container)
-                    container_layout.setContentsMargins(0, 0, 0, 0)
-                    container_layout.setAlignment(Qt.AlignCenter)
-
-                    # Ensure faculty_data has all required fields
-                    safe_faculty_data = {
-                        'id': faculty_data.get('id'),
-                        'name': faculty_data.get('name', 'Unknown'),
-                        'department': faculty_data.get('department', ''),
-                        'available': faculty_data.get('status', False) or faculty_data.get('always_available', False),
-                        'status': 'Available' if (faculty_data.get('status', False) or faculty_data.get('always_available', False)) else 'Unavailable',
-                        'email': faculty_data.get('email', ''),
-                        'room': faculty_data.get('room', None)
-                    }
-
-                    logger.debug(f"Creating card for faculty {safe_faculty_data['name']}: available={safe_faculty_data['available']}, status={safe_faculty_data['status']}")
-
-                    # Get pooled faculty card
-                    card = self.faculty_card_manager.get_faculty_card(
-                        safe_faculty_data,
-                        consultation_callback=lambda f_data=safe_faculty_data: self.show_consultation_form_safe(f_data)
-                    )
-
-                    # Connect consultation signal if it exists
-                    if hasattr(card, 'consultation_requested'):
-                        card.consultation_requested.connect(lambda f_data=safe_faculty_data: self.show_consultation_form_safe(f_data))
-
-                    # Add card to container
-                    container_layout.addWidget(card)
-
-                    # Store container for batch processing
-                    containers.append((container, row, col))
-
-                    col += 1
-                    if col >= max_cols:
-                        col = 0
-                        row += 1
-
-                    logger.debug(f"Successfully created card for faculty {safe_faculty_data['name']}")
-
-                except Exception as e:
-                    faculty_name = faculty_data.get('name', 'Unknown') if isinstance(faculty_data, dict) else 'Unknown'
-                    logger.error(f"Error creating faculty card for {faculty_name}: {e}")
-                    continue
-
-            # Now add all containers to the grid at once
-            for container, r, c in containers:
-                self.faculty_grid.addWidget(container, r, c)
-
-            # Log successful population
-            logger.info(f"Successfully populated faculty grid with {len(containers)} faculty cards (safe mode)")
 
         finally:
             # Re-enable updates after all changes are made
@@ -1269,11 +999,10 @@ class DashboardWindow(BaseWindow):
             # Get faculty controller
             faculty_controller = FacultyController()
 
-            # Get filtered faculty list using safe mode
+            # Get filtered faculty list
             faculties = faculty_controller.get_all_faculty(
                 filter_available=filter_available,
-                search_term=search_text,
-                safe_mode=True
+                search_term=search_text
             )
 
             # Update the grid
@@ -1317,11 +1046,10 @@ class DashboardWindow(BaseWindow):
             # Get faculty controller
             faculty_controller = FacultyController()
 
-            # Get updated faculty list with current filters using safe mode
+            # Get updated faculty list with current filters
             faculties = faculty_controller.get_all_faculty(
                 filter_available=filter_available,
-                search_term=search_text,
-                safe_mode=True
+                search_term=search_text
             )
 
             # Use smart refresh manager for adaptive refresh rates
@@ -1365,6 +1093,8 @@ class DashboardWindow(BaseWindow):
                 self._last_history_refresh = current_time
 
         except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
             logger.error(f"Error refreshing faculty status: {str(e)}")
 
             # Hide loading indicator on error
@@ -1383,10 +1113,10 @@ class DashboardWindow(BaseWindow):
 
     def _extract_faculty_data(self, faculties):
         """
-        Extract relevant data from faculty objects or dictionaries for comparison.
+        Extract relevant data from faculty objects for comparison.
 
         Args:
-            faculties (list): List of faculty objects or dictionaries
+            faculties (list): List of faculty objects
 
         Returns:
             str: Hash of faculty data for efficient comparison
@@ -1394,34 +1124,18 @@ class DashboardWindow(BaseWindow):
         import hashlib
         # Create a string representation of all relevant faculty data
         data_str = ""
-
-        # Handle both objects and dictionaries
-        try:
-            if faculties and isinstance(faculties[0], dict):
-                # Handle dictionary data
-                for f_data in sorted(faculties, key=lambda x: x.get('id', 0)):
-                    faculty_id = f_data.get('id', 0)
-                    faculty_name = f_data.get('name', '')
-                    faculty_status = f_data.get('status', False)
-                    faculty_department = f_data.get('department', '')
-                    data_str += f"{faculty_id}:{faculty_name}:{faculty_status}:{faculty_department};"
-            else:
-                # Handle object data
-                for f in sorted(faculties, key=lambda x: x.id):  # Sort for consistent hashing
-                    try:
-                        # Access attributes safely to avoid DetachedInstanceError
-                        faculty_id = f.id
-                        faculty_name = f.name
-                        faculty_status = f.status
-                        faculty_department = getattr(f, 'department', '')
-                        data_str += f"{faculty_id}:{faculty_name}:{faculty_status}:{faculty_department};"
-                    except Exception as e:
-                        logger.warning(f"Error accessing faculty attributes for hashing: {e}")
-                        # Use a fallback representation
-                        data_str += f"error:{e};"
-        except Exception as e:
-            logger.warning(f"Error processing faculty data for hashing: {e}")
-            data_str = f"error:{e}"
+        for f in sorted(faculties, key=lambda x: x.id):  # Sort for consistent hashing
+            try:
+                # Access attributes safely to avoid DetachedInstanceError
+                faculty_id = f.id
+                faculty_name = f.name
+                faculty_status = f.status
+                faculty_department = getattr(f, 'department', '')
+                data_str += f"{faculty_id}:{faculty_name}:{faculty_status}:{faculty_department};"
+            except Exception as e:
+                logger.warning(f"Error accessing faculty attributes for hashing: {e}")
+                # Use a fallback representation
+                data_str += f"error:{e};"
 
         # Return hash for efficient comparison
         return hashlib.md5(data_str.encode()).hexdigest()
@@ -1444,67 +1158,6 @@ class DashboardWindow(BaseWindow):
         new_hash = self._extract_faculty_data(new_faculties)
 
         return old_hash == new_hash
-
-    def show_consultation_form_safe(self, faculty_data):
-        """
-        Show the consultation request form for a specific faculty using safe dictionary data.
-
-        Args:
-            faculty_data (dict or int): Faculty data dictionary or faculty ID
-        """
-        # Handle case where faculty_data is passed as an integer (faculty ID)
-        if isinstance(faculty_data, int):
-            logger.debug(f"Faculty data passed as integer {faculty_data}, attempting to fetch faculty data")
-            # Try to get faculty data from controller
-            try:
-                from ..controllers import FacultyController
-                faculty_controller = FacultyController()
-                faculty = faculty_controller.get_faculty_by_id(faculty_data)
-                if faculty:
-                    # Convert to dictionary format
-                    faculty_data = {
-                        'id': faculty.id,
-                        'name': faculty.name,
-                        'department': faculty.department,
-                        'status': faculty.status,
-                        'available': faculty.status or getattr(faculty, 'always_available', False),
-                        'email': getattr(faculty, 'email', ''),
-                        'room': getattr(faculty, 'room', None)
-                    }
-                else:
-                    logger.error(f"Faculty with ID {faculty_data} not found")
-                    self.show_notification(f"Faculty with ID {faculty_data} not found", "error")
-                    return
-            except Exception as e:
-                logger.error(f"Error fetching faculty data for ID {faculty_data}: {e}")
-                self.show_notification("Error loading faculty information", "error")
-                return
-
-        # Validate that faculty_data is now a dictionary
-        if not isinstance(faculty_data, dict):
-            logger.error(f"Invalid faculty data type: {type(faculty_data)}, expected dict")
-            self.show_notification("Invalid faculty data", "error")
-            return
-
-        # Check if faculty is available
-        if not faculty_data.get('available', False):
-            self.show_notification(
-                f"Faculty {faculty_data.get('name', 'Unknown')} is currently unavailable for consultation.",
-                "error"
-            )
-            return
-
-        # Also populate the dropdown with all available faculty
-        try:
-            from ..controllers import FacultyController
-            faculty_controller = FacultyController()
-            available_faculty = faculty_controller.get_all_faculty(filter_available=True, safe_mode=True)
-
-            # Set the faculty and faculty options in the consultation panel
-            self.consultation_panel.set_faculty_safe(faculty_data)
-            self.consultation_panel.set_faculty_options_safe(available_faculty)
-        except Exception as e:
-            logger.error(f"Error loading available faculty for consultation form: {str(e)}")
 
     def show_consultation_form(self, faculty):
         """
@@ -1773,20 +1426,16 @@ class DashboardWindow(BaseWindow):
             # Get faculty controller
             faculty_controller = FacultyController()
 
-            # Get available faculty using safe mode
-            available_faculty = faculty_controller.get_all_faculty(filter_available=True, safe_mode=True)
+            # Get available faculty
+            available_faculty = faculty_controller.get_all_faculty(filter_available=True)
 
             if available_faculty:
                 # Use the first available faculty
-                faculty_data = available_faculty[0]
-                faculty_name = faculty_data.get('name', 'Unknown') if isinstance(faculty_data, dict) else faculty_data.name
-                logger.info(f"Simulating consultation request with faculty: {faculty_name}")
+                faculty = available_faculty[0]
+                logger.info(f"Simulating consultation request with faculty: {faculty.name}")
 
-                # Show the consultation form using safe method
-                if isinstance(faculty_data, dict):
-                    self.show_consultation_form_safe(faculty_data)
-                else:
-                    self.show_consultation_form(faculty_data)
+                # Show the consultation form
+                self.show_consultation_form(faculty)
             else:
                 logger.warning("No available faculty found for simulation")
                 self.show_notification("No available faculty found. Please try again later.", "error")
@@ -1837,30 +1486,21 @@ class DashboardWindow(BaseWindow):
             # Get faculty controller
             faculty_controller = FacultyController()
 
-            # Get all faculty members using safe mode
-            faculties = faculty_controller.get_all_faculty(safe_mode=True)
+            # Get all faculty members
+            faculties = faculty_controller.get_all_faculty()
 
-            logger.info(f"Initial load: Found {len(faculties)} faculty members (safe mode)")
+            logger.info(f"Initial load: Found {len(faculties)} faculty members")
 
             # Debug: Log each faculty member
             for faculty in faculties:
-                if isinstance(faculty, dict):
-                    logger.debug(f"Faculty found: {faculty.get('name', 'Unknown')} (ID: {faculty.get('id', 'N/A')}, Status: {faculty.get('status', False)}, Department: {faculty.get('department', 'N/A')})")
-                else:
-                    logger.debug(f"Faculty found: {faculty.name} (ID: {faculty.id}, Status: {faculty.status}, Department: {faculty.department})")
+                logger.debug(f"Faculty found: {faculty.name} (ID: {faculty.id}, Status: {faculty.status}, Department: {faculty.department})")
 
-            # Populate the faculty grid using safe method
-            if hasattr(self, 'populate_faculty_grid_safe'):
-                self.populate_faculty_grid_safe(faculties)
-            else:
-                self.populate_faculty_grid(faculties)
+            # Populate the faculty grid
+            self.populate_faculty_grid(faculties)
 
             # Also update the consultation panel with faculty options
             if hasattr(self, 'consultation_panel'):
-                if hasattr(self.consultation_panel, 'set_faculty_options_safe'):
-                    self.consultation_panel.set_faculty_options_safe(faculties)
-                else:
-                    self.consultation_panel.set_faculty_options(faculties)
+                self.consultation_panel.set_faculty_options(faculties)
                 logger.debug("Updated consultation panel with faculty options")
 
             # Ensure scroll area starts at the top
@@ -1881,9 +1521,6 @@ class DashboardWindow(BaseWindow):
         """
         Handle window close event with proper cleanup.
         """
-        # Clean up MQTT listeners
-        self._cleanup_mqtt_listeners()
-
         # Clean up faculty card manager
         if hasattr(self, 'faculty_card_manager'):
             self.faculty_card_manager.clear_all_cards()
@@ -1893,14 +1530,3 @@ class DashboardWindow(BaseWindow):
 
         # Call parent close event
         super().closeEvent(event)
-
-    def _cleanup_mqtt_listeners(self):
-        """
-        Clean up MQTT listeners when closing the dashboard.
-        """
-        try:
-            # Note: In a production system, you would unsubscribe from MQTT topics here
-            # For now, we'll just log the cleanup
-            logger.info("Dashboard MQTT listeners cleaned up")
-        except Exception as e:
-            logger.error(f"Error cleaning up MQTT listeners: {e}")
