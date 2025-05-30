@@ -1,7 +1,7 @@
 import logging
 import datetime
 from sqlalchemy import or_, func
-from ..models import Faculty, get_db
+from ..models import Faculty
 from ..utils.mqtt_utils import publish_faculty_status, subscribe_to_topic, publish_mqtt_message
 from ..utils.mqtt_topics import MQTTTopics
 from ..utils.cache_manager import cached, invalidate_faculty_cache, cache_faculty_list_key, get_cache_manager
@@ -171,31 +171,24 @@ class FacultyController:
                     status = True
                     # Extract faculty name from client ID (DeskUnit_FacultyName)
                     # This is more flexible than hardcoding a specific faculty name
-                    db = get_db()
+                    from ..services.database_manager import get_database_manager
+                    db_manager = get_database_manager()
 
                     # Try to find the faculty from the MQTT client ID if available
                     # If not available, look for faculty with BLE beacons configured
                     faculty = None
                 elif data == "keychain_disconnected" or data == "faculty_absent":
                     status = False
-                    db = get_db()
+                    from ..services.database_manager import get_database_manager
+                    db_manager = get_database_manager()
                     faculty = None
 
                     # First, try to find any faculty with BLE configured and status=False
                     # This assumes the BLE connection is for a faculty that was previously disconnected
-                    faculty = db.query(Faculty).filter(
-                        Faculty.ble_id.isnot(None),
-                        Faculty.status == False
-                    ).first()
-
-                    if faculty:
-                        faculty_id = faculty.id
-                        faculty_name = faculty.name
-                        logger.info(f"BLE beacon connected for faculty desk unit (ID: {faculty_id}, Name: {faculty_name})")
-                    else:
-                        # If no disconnected faculty found, look for any faculty with BLE configured
+                    with db_manager.get_session_context() as db:
                         faculty = db.query(Faculty).filter(
-                            Faculty.ble_id.isnot(None)
+                            Faculty.ble_id.isnot(None),
+                            Faculty.status == False
                         ).first()
 
                         if faculty:
@@ -203,28 +196,30 @@ class FacultyController:
                             faculty_name = faculty.name
                             logger.info(f"BLE beacon connected for faculty desk unit (ID: {faculty_id}, Name: {faculty_name})")
                         else:
-                            logger.error("No faculty with BLE configuration found in database")
-                            return
+                            # If no disconnected faculty found, look for any faculty with BLE configured
+                            faculty = db.query(Faculty).filter(
+                                Faculty.ble_id.isnot(None)
+                            ).first()
+
+                            if faculty:
+                                faculty_id = faculty.id
+                                faculty_name = faculty.name
+                                logger.info(f"BLE beacon connected for faculty desk unit (ID: {faculty_id}, Name: {faculty_name})")
+                            else:
+                                logger.error("No faculty with BLE configuration found in database")
+                                return
                 elif data == "keychain_disconnected":
                     status = False
                     # Similar approach as above for finding the faculty
-                    db = get_db()
+                    from ..services.database_manager import get_database_manager
+                    db_manager = get_database_manager()
 
                     # First, try to find any faculty with BLE configured and status=True
                     # This assumes the BLE disconnection is for a faculty that was previously connected
-                    faculty = db.query(Faculty).filter(
-                        Faculty.ble_id.isnot(None),
-                        Faculty.status == True
-                    ).first()
-
-                    if faculty:
-                        faculty_id = faculty.id
-                        faculty_name = faculty.name
-                        logger.info(f"BLE beacon disconnected for faculty desk unit (ID: {faculty_id}, Name: {faculty_name})")
-                    else:
-                        # If no connected faculty found, look for any faculty with BLE configured
+                    with db_manager.get_session_context() as db:
                         faculty = db.query(Faculty).filter(
-                            Faculty.ble_id.isnot(None)
+                            Faculty.ble_id.isnot(None),
+                            Faculty.status == True
                         ).first()
 
                         if faculty:
@@ -232,8 +227,18 @@ class FacultyController:
                             faculty_name = faculty.name
                             logger.info(f"BLE beacon disconnected for faculty desk unit (ID: {faculty_id}, Name: {faculty_name})")
                         else:
-                            logger.error("No faculty with BLE configuration found in database")
-                            return
+                            # If no connected faculty found, look for any faculty with BLE configured
+                            faculty = db.query(Faculty).filter(
+                                Faculty.ble_id.isnot(None)
+                            ).first()
+
+                            if faculty:
+                                faculty_id = faculty.id
+                                faculty_name = faculty.name
+                                logger.info(f"BLE beacon disconnected for faculty desk unit (ID: {faculty_id}, Name: {faculty_name})")
+                            else:
+                                logger.error("No faculty with BLE configuration found in database")
+                                return
             else:
                 # This is a JSON message
                 status = data.get('status', False)
@@ -242,26 +247,30 @@ class FacultyController:
 
                 if faculty_id is None and faculty_name is not None:
                     # Try to find faculty by name
-                    db = get_db()
-                    faculty = db.query(Faculty).filter(Faculty.name == faculty_name).first()
-                    if faculty:
-                        faculty_id = faculty.id
-                    else:
-                        logger.error(f"Faculty '{faculty_name}' not found in database")
-                        return
+                    from ..services.database_manager import get_database_manager
+                    db_manager = get_database_manager()
+                    with db_manager.get_session_context() as db:
+                        faculty = db.query(Faculty).filter(Faculty.name == faculty_name).first()
+                        if faculty:
+                            faculty_id = faculty.id
+                        else:
+                            logger.error(f"Faculty '{faculty_name}' not found in database")
+                            return
                 elif faculty_id is None:
                     # No faculty ID or name provided, try to find any faculty with BLE configured
-                    db = get_db()
-                    faculty = db.query(Faculty).filter(
-                        Faculty.ble_id.isnot(None)
-                    ).first()
+                    from ..services.database_manager import get_database_manager
+                    db_manager = get_database_manager()
+                    with db_manager.get_session_context() as db:
+                        faculty = db.query(Faculty).filter(
+                            Faculty.ble_id.isnot(None)
+                        ).first()
 
-                    if faculty:
-                        faculty_id = faculty.id
-                        faculty_name = faculty.name
-                    else:
-                        logger.error("No faculty with BLE configuration found in database")
-                        return
+                        if faculty:
+                            faculty_id = faculty.id
+                            faculty_name = faculty.name
+                        else:
+                            logger.error("No faculty with BLE configuration found in database")
+                            return
         else:
             # Extract faculty ID from topic (e.g., "consultease/faculty/123/status")
             parts = topic.split('/')
@@ -628,8 +637,10 @@ class FacultyController:
             list or dict: List of Faculty objects, or paginated results if page is specified
         """
         try:
-            db = get_db(force_new=True)  # Force new session to avoid DetachedInstanceError
-            try:
+            from ..services.database_manager import get_database_manager
+            db_manager = get_database_manager()
+
+            with db_manager.get_session_context() as db:
                 query = db.query(Faculty)
 
                 # Apply filters
@@ -665,9 +676,6 @@ class FacultyController:
                 logger.debug(f"Retrieved {len(faculties)} faculty members")
                 return faculties
 
-            finally:
-                db.close()
-
         except Exception as e:
             logger.error(f"Error getting faculty list: {str(e)}")
             return [] if page is None else {'items': [], 'total_count': 0, 'page': 1, 'total_pages': 0}
@@ -683,9 +691,11 @@ class FacultyController:
             Faculty: Faculty object or None if not found
         """
         try:
-            db = get_db()
-            faculty = db.query(Faculty).filter(Faculty.id == faculty_id).first()
-            return faculty
+            from ..services.database_manager import get_database_manager
+            db_manager = get_database_manager()
+            with db_manager.get_session_context() as db:
+                faculty = db.query(Faculty).filter(Faculty.id == faculty_id).first()
+                return faculty
         except Exception as e:
             logger.error(f"Error getting faculty by ID: {str(e)}")
             return None
@@ -701,15 +711,17 @@ class FacultyController:
             Faculty: Faculty object or None if not found
         """
         try:
-            db = get_db()
-            faculty = db.query(Faculty).filter(Faculty.ble_id == ble_id).first()
+            from ..services.database_manager import get_database_manager
+            db_manager = get_database_manager()
+            with db_manager.get_session_context() as db:
+                faculty = db.query(Faculty).filter(Faculty.ble_id == ble_id).first()
 
-            if faculty:
-                logger.info(f"Found faculty with BLE ID {ble_id}: {faculty.name} (ID: {faculty.id})")
-            else:
-                logger.warning(f"No faculty found with BLE ID: {ble_id}")
+                if faculty:
+                    logger.info(f"Found faculty with BLE ID {ble_id}: {faculty.name} (ID: {faculty.id})")
+                else:
+                    logger.warning(f"No faculty found with BLE ID: {ble_id}")
 
-            return faculty
+                return faculty
         except Exception as e:
             logger.error(f"Error getting faculty by BLE ID: {str(e)}")
             return None
@@ -781,37 +793,41 @@ class FacultyController:
     def _check_faculty_duplicates(self, email, ble_id):
         """Check for duplicate email or BLE ID."""
         try:
-            db = get_db()
-            existing = db.query(Faculty).filter(
-                or_(Faculty.email == email, Faculty.ble_id == ble_id)
-            ).first()
+            from ..services.database_manager import get_database_manager
+            db_manager = get_database_manager()
+            with db_manager.get_session_context() as db:
+                existing = db.query(Faculty).filter(
+                    or_(Faculty.email == email, Faculty.ble_id == ble_id)
+                ).first()
 
-            if existing:
-                return f"Faculty with email {email} or BLE ID {ble_id} already exists"
-            return None
+                if existing:
+                    return f"Faculty with email {email} or BLE ID {ble_id} already exists"
+                return None
         except Exception as e:
             logger.error(f"Error checking faculty duplicates: {e}")
             return f"Error checking for duplicates: {str(e)}"
 
     def _create_and_save_faculty(self, name, department, email, ble_id, image_path):
         """Create and save new faculty to database."""
-        db = get_db()
+        from ..services.database_manager import get_database_manager
+        db_manager = get_database_manager()
 
-        faculty = Faculty(
-            name=name,
-            department=department,
-            email=email,
-            ble_id=ble_id,
-            image_path=image_path,
-            status=False,  # Initial status is False, will be updated by BLE
-            always_available=False  # Always set to False
-        )
+        with db_manager.get_session_context() as db:
+            faculty = Faculty(
+                name=name,
+                department=department,
+                email=email,
+                ble_id=ble_id,
+                image_path=image_path,
+                status=False,  # Initial status is False, will be updated by BLE
+                always_available=False  # Always set to False
+            )
 
-        db.add(faculty)
-        db.commit()
+            db.add(faculty)
+            db.commit()
 
-        logger.info(f"Added new faculty: {faculty.name} (ID: {faculty.id})")
-        return faculty
+            logger.info(f"Added new faculty: {faculty.name} (ID: {faculty.id})")
+            return faculty
 
     def _handle_faculty_creation_success(self, faculty):
         """Handle post-creation tasks for new faculty."""
@@ -874,29 +890,30 @@ class FacultyController:
                 return
 
             # Update last seen timestamp for the faculty
-            db = get_db()
+            from ..services.database_manager import get_database_manager
+            db_manager = get_database_manager()
             try:
-                faculty = db.query(Faculty).filter(Faculty.id == faculty_id).first()
-                if faculty:
-                    faculty.last_seen = datetime.datetime.now()
-                    db.commit()
+                with db_manager.get_session_context() as db:
+                    faculty = db.query(Faculty).filter(Faculty.id == faculty_id).first()
+                    if faculty:
+                        faculty.last_seen = datetime.datetime.now()
+                        db.commit()
 
-                    # Log important status changes
-                    if 'ntp_sync_status' in heartbeat_data:
-                        ntp_status = heartbeat_data['ntp_sync_status']
-                        if ntp_status == 'FAILED':
-                            logger.warning(f"Faculty {faculty_id} ({faculty.name}) NTP sync failed")
-                        elif ntp_status == 'SYNCED':
-                            logger.debug(f"Faculty {faculty_id} ({faculty.name}) NTP synced")
+                        # Log important status changes
+                        if 'ntp_sync_status' in heartbeat_data:
+                            ntp_status = heartbeat_data['ntp_sync_status']
+                            if ntp_status == 'FAILED':
+                                logger.warning(f"Faculty {faculty_id} ({faculty.name}) NTP sync failed")
+                            elif ntp_status == 'SYNCED':
+                                logger.debug(f"Faculty {faculty_id} ({faculty.name}) NTP synced")
 
-                    # Monitor system health
-                    if 'free_heap' in heartbeat_data:
-                        free_heap = heartbeat_data.get('free_heap', 0)
-                        if free_heap < 50000:  # Less than 50KB free
-                            logger.warning(f"Faculty {faculty_id} ({faculty.name}) low memory: {free_heap} bytes")
-
-            finally:
-                db.close()
+                        # Monitor system health
+                        if 'free_heap' in heartbeat_data:
+                            free_heap = heartbeat_data.get('free_heap', 0)
+                            if free_heap < 50000:  # Less than 50KB free
+                                logger.warning(f"Faculty {faculty_id} ({faculty.name}) low memory: {free_heap} bytes")
+            except Exception as e:
+                logger.error(f"Error updating faculty heartbeat: {e}")
 
         except Exception as e:
             logger.debug(f"Error processing faculty heartbeat: {str(e)}")
@@ -954,58 +971,60 @@ class FacultyController:
             Faculty: Updated faculty object or None if error
         """
         try:
-            db = get_db()
-            faculty = db.query(Faculty).filter(Faculty.id == faculty_id).first()
+            from ..services.database_manager import get_database_manager
+            db_manager = get_database_manager()
+            with db_manager.get_session_context() as db:
+                faculty = db.query(Faculty).filter(Faculty.id == faculty_id).first()
 
-            if not faculty:
-                logger.error(f"Faculty not found: {faculty_id}")
-                return None
-
-            # Update fields if provided
-            if name is not None:
-                faculty.name = name
-
-            if department is not None:
-                faculty.department = department
-
-            if email is not None and email != faculty.email:
-                # Check if email already exists
-                existing = db.query(Faculty).filter(Faculty.email == email).first()
-                if existing and existing.id != faculty_id:
-                    logger.error(f"Faculty with email {email} already exists")
+                if not faculty:
+                    logger.error(f"Faculty not found: {faculty_id}")
                     return None
-                faculty.email = email
 
-            if ble_id is not None and ble_id != faculty.ble_id:
-                # Check if BLE ID already exists
-                existing = db.query(Faculty).filter(Faculty.ble_id == ble_id).first()
-                if existing and existing.id != faculty_id:
-                    logger.error(f"Faculty with BLE ID {ble_id} already exists")
-                    return None
-                faculty.ble_id = ble_id
+                # Update fields if provided
+                if name is not None:
+                    faculty.name = name
 
-            if image_path is not None:
-                faculty.image_path = image_path
+                if department is not None:
+                    faculty.department = department
 
-            # Set always_available to False regardless of input
-            # Status is always determined by BLE connection
-            if faculty.always_available:
-                faculty.always_available = False
-                logger.info(f"Faculty {faculty.name} (ID: {faculty.id}) status will be determined by BLE connection")
+                if email is not None and email != faculty.email:
+                    # Check if email already exists
+                    existing = db.query(Faculty).filter(Faculty.email == email).first()
+                    if existing and existing.id != faculty_id:
+                        logger.error(f"Faculty with email {email} already exists")
+                        return None
+                    faculty.email = email
 
-            db.commit()
+                if ble_id is not None and ble_id != faculty.ble_id:
+                    # Check if BLE ID already exists
+                    existing = db.query(Faculty).filter(Faculty.ble_id == ble_id).first()
+                    if existing and existing.id != faculty_id:
+                        logger.error(f"Faculty with BLE ID {ble_id} already exists")
+                        return None
+                    faculty.ble_id = ble_id
 
-            logger.info(f"Updated faculty: {faculty.name} (ID: {faculty.id})")
+                if image_path is not None:
+                    faculty.image_path = image_path
 
-            # Invalidate faculty cache
-            invalidate_faculty_cache()
-            invalidate_cache_pattern("get_all_faculty")
+                # Set always_available to False regardless of input
+                # Status is always determined by BLE connection
+                if faculty.always_available:
+                    faculty.always_available = False
+                    logger.info(f"Faculty {faculty.name} (ID: {faculty.id}) status will be determined by BLE connection")
 
-            # Clear method-level cache if it exists
-            if hasattr(self.get_all_faculty, 'cache_clear'):
-                self.get_all_faculty.cache_clear()
+                db.commit()
 
-            return faculty
+                logger.info(f"Updated faculty: {faculty.name} (ID: {faculty.id})")
+
+                # Invalidate faculty cache
+                invalidate_faculty_cache()
+                invalidate_cache_pattern("get_all_faculty")
+
+                # Clear method-level cache if it exists
+                if hasattr(self.get_all_faculty, 'cache_clear'):
+                    self.get_all_faculty.cache_clear()
+
+                return faculty
         except Exception as e:
             logger.error(f"Error updating faculty: {str(e)}")
             return None
@@ -1022,40 +1041,41 @@ class FacultyController:
             bool: True if successful, False otherwise
         """
         try:
-            db = get_db()
-            faculty = db.query(Faculty).filter(Faculty.id == faculty_id).first()
+            from ..services.database_manager import get_database_manager
+            db_manager = get_database_manager()
+            with db_manager.get_session_context() as db:
+                faculty = db.query(Faculty).filter(Faculty.id == faculty_id).first()
 
-            if not faculty:
-                logger.error(f"Faculty with ID {faculty_id} not found")
-                return False
-
-            # Validate BLE ID format
-            if ble_id and not Faculty.validate_ble_id(ble_id):
-                logger.error(f"Invalid BLE ID format: {ble_id}")
-                return False
-
-            # Check if BLE ID is already in use by another faculty
-            if ble_id:
-                existing = db.query(Faculty).filter(
-                    Faculty.ble_id == ble_id,
-                    Faculty.id != faculty_id
-                ).first()
-
-                if existing:
-                    logger.error(f"BLE ID {ble_id} is already in use by faculty {existing.name}")
+                if not faculty:
+                    logger.error(f"Faculty with ID {faculty_id} not found")
                     return False
 
-            # Update BLE ID
-            faculty.ble_id = ble_id
-            faculty.updated_at = func.now()
-            db.commit()
+                # Validate BLE ID format
+                if ble_id and not Faculty.validate_ble_id(ble_id):
+                    logger.error(f"Invalid BLE ID format: {ble_id}")
+                    return False
 
-            logger.info(f"Updated BLE ID for faculty {faculty.name} (ID: {faculty_id}) to {ble_id}")
-            return True
+                # Check if BLE ID is already in use by another faculty
+                if ble_id:
+                    existing = db.query(Faculty).filter(
+                        Faculty.ble_id == ble_id,
+                        Faculty.id != faculty_id
+                    ).first()
+
+                    if existing:
+                        logger.error(f"BLE ID {ble_id} is already in use by faculty {existing.name}")
+                        return False
+
+                # Update BLE ID
+                faculty.ble_id = ble_id
+                faculty.updated_at = func.now()
+                db.commit()
+
+                logger.info(f"Updated BLE ID for faculty {faculty.name} (ID: {faculty_id}) to {ble_id}")
+                return True
 
         except Exception as e:
             logger.error(f"Error updating faculty BLE ID: {str(e)}")
-            db.rollback()
             return False
 
     def delete_faculty(self, faculty_id):
@@ -1069,27 +1089,32 @@ class FacultyController:
             bool: True if successful, False otherwise
         """
         try:
-            db = get_db()
-            faculty = db.query(Faculty).filter(Faculty.id == faculty_id).first()
+            from ..services.database_manager import get_database_manager
+            db_manager = get_database_manager()
+            with db_manager.get_session_context() as db:
+                faculty = db.query(Faculty).filter(Faculty.id == faculty_id).first()
 
-            if not faculty:
-                logger.error(f"Faculty not found: {faculty_id}")
-                return False
+                if not faculty:
+                    logger.error(f"Faculty not found: {faculty_id}")
+                    return False
 
-            db.delete(faculty)
-            db.commit()
+                faculty_name = faculty.name
+                faculty_id_for_log = faculty.id
 
-            logger.info(f"Deleted faculty: {faculty.name} (ID: {faculty.id})")
+                db.delete(faculty)
+                db.commit()
 
-            # Invalidate faculty cache
-            invalidate_faculty_cache()
-            invalidate_cache_pattern("get_all_faculty")
+                logger.info(f"Deleted faculty: {faculty_name} (ID: {faculty_id_for_log})")
 
-            # Clear method-level cache if it exists
-            if hasattr(self.get_all_faculty, 'cache_clear'):
-                self.get_all_faculty.cache_clear()
+                # Invalidate faculty cache
+                invalidate_faculty_cache()
+                invalidate_cache_pattern("get_all_faculty")
 
-            return True
+                # Clear method-level cache if it exists
+                if hasattr(self.get_all_faculty, 'cache_clear'):
+                    self.get_all_faculty.cache_clear()
+
+                return True
         except Exception as e:
             logger.error(f"Error deleting faculty: {str(e)}")
             return False
@@ -1103,35 +1128,36 @@ class FacultyController:
             Faculty: The available faculty member or None if error
         """
         try:
-            db = get_db()
+            from ..services.database_manager import get_database_manager
+            db_manager = get_database_manager()
+            with db_manager.get_session_context() as db:
+                # Check if any faculty is available
+                available_faculty = db.query(Faculty).filter(Faculty.status == True).first()
 
-            # Check if any faculty is available
-            available_faculty = db.query(Faculty).filter(Faculty.status == True).first()
+                if available_faculty:
+                    logger.info(f"Found available faculty: {available_faculty.name} (ID: {available_faculty.id})")
+                    return available_faculty
 
-            if available_faculty:
-                logger.info(f"Found available faculty: {available_faculty.name} (ID: {available_faculty.id})")
-                return available_faculty
+                # If no faculty is available, make Dr. John Smith available
+                dr_john = db.query(Faculty).filter(Faculty.name == "Dr. John Smith").first()
 
-            # If no faculty is available, make Dr. John Smith available
-            dr_john = db.query(Faculty).filter(Faculty.name == "Dr. John Smith").first()
+                if dr_john:
+                    logger.info(f"Making Dr. John Smith (ID: {dr_john.id}) available for testing")
+                    dr_john.status = True
+                    db.commit()
+                    return dr_john
 
-            if dr_john:
-                logger.info(f"Making Dr. John Smith (ID: {dr_john.id}) available for testing")
-                dr_john.status = True
-                db.commit()
-                return dr_john
+                # If Dr. John Smith doesn't exist, make the first faculty available
+                first_faculty = db.query(Faculty).first()
 
-            # If Dr. John Smith doesn't exist, make the first faculty available
-            first_faculty = db.query(Faculty).first()
+                if first_faculty:
+                    logger.info(f"Making {first_faculty.name} (ID: {first_faculty.id}) available for testing")
+                    first_faculty.status = True
+                    db.commit()
+                    return first_faculty
 
-            if first_faculty:
-                logger.info(f"Making {first_faculty.name} (ID: {first_faculty.id}) available for testing")
-                first_faculty.status = True
-                db.commit()
-                return first_faculty
-
-            logger.warning("No faculty found in the database")
-            return None
+                logger.warning("No faculty found in the database")
+                return None
         except Exception as e:
             logger.error(f"Error ensuring available faculty: {str(e)}")
             return None
