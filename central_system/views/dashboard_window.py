@@ -1450,8 +1450,42 @@ class DashboardWindow(BaseWindow):
         Show the consultation request form for a specific faculty using safe dictionary data.
 
         Args:
-            faculty_data (dict): Faculty data dictionary
+            faculty_data (dict or int): Faculty data dictionary or faculty ID
         """
+        # Handle case where faculty_data is passed as an integer (faculty ID)
+        if isinstance(faculty_data, int):
+            logger.debug(f"Faculty data passed as integer {faculty_data}, attempting to fetch faculty data")
+            # Try to get faculty data from controller
+            try:
+                from ..controllers import FacultyController
+                faculty_controller = FacultyController()
+                faculty = faculty_controller.get_faculty_by_id(faculty_data)
+                if faculty:
+                    # Convert to dictionary format
+                    faculty_data = {
+                        'id': faculty.id,
+                        'name': faculty.name,
+                        'department': faculty.department,
+                        'status': faculty.status,
+                        'available': faculty.status or getattr(faculty, 'always_available', False),
+                        'email': getattr(faculty, 'email', ''),
+                        'room': getattr(faculty, 'room', None)
+                    }
+                else:
+                    logger.error(f"Faculty with ID {faculty_data} not found")
+                    self.show_notification(f"Faculty with ID {faculty_data} not found", "error")
+                    return
+            except Exception as e:
+                logger.error(f"Error fetching faculty data for ID {faculty_data}: {e}")
+                self.show_notification("Error loading faculty information", "error")
+                return
+
+        # Validate that faculty_data is now a dictionary
+        if not isinstance(faculty_data, dict):
+            logger.error(f"Invalid faculty data type: {type(faculty_data)}, expected dict")
+            self.show_notification("Invalid faculty data", "error")
+            return
+
         # Check if faculty is available
         if not faculty_data.get('available', False):
             self.show_notification(
