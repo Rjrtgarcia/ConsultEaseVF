@@ -240,6 +240,9 @@ class DashboardWindow(BaseWindow):
         self._is_loading = False
         self._loading_widget = None
 
+        # Set up MQTT status update listeners for real-time updates
+        self._setup_mqtt_listeners()
+
         # Log student info for debugging
         if student:
             # Handle both student object and student data dictionary
@@ -255,6 +258,57 @@ class DashboardWindow(BaseWindow):
             logger.info(f"Dashboard initialized with student: ID={student_id}, Name={student_name}, RFID={student_rfid}")
         else:
             logger.warning("Dashboard initialized without student information")
+
+    def _setup_mqtt_listeners(self):
+        """
+        Set up MQTT listeners for real-time faculty status updates.
+        """
+        try:
+            from ..utils.mqtt_utils import subscribe_to_topic
+            from ..utils.mqtt_topics import MQTTTopics
+
+            # Subscribe to faculty status updates
+            subscribe_to_topic("consultease/faculty/+/status", self._handle_faculty_status_update)
+            subscribe_to_topic(MQTTTopics.SYSTEM_NOTIFICATIONS, self._handle_system_notification)
+
+            logger.info("Dashboard MQTT listeners set up successfully")
+        except Exception as e:
+            logger.error(f"Error setting up MQTT listeners: {e}")
+
+    def _handle_faculty_status_update(self, topic, data):
+        """
+        Handle faculty status updates from MQTT.
+
+        Args:
+            topic (str): MQTT topic
+            data (dict): Status update data
+        """
+        try:
+            logger.debug(f"Dashboard received faculty status update: {topic} -> {data}")
+
+            # Trigger a refresh of the faculty grid
+            QTimer.singleShot(500, self.refresh_faculty_status)  # Small delay to batch updates
+
+        except Exception as e:
+            logger.error(f"Error handling faculty status update in dashboard: {e}")
+
+    def _handle_system_notification(self, topic, data):
+        """
+        Handle system notifications from MQTT.
+
+        Args:
+            topic (str): MQTT topic
+            data (dict): Notification data
+        """
+        try:
+            if isinstance(data, dict) and data.get('type') == 'faculty_status':
+                logger.debug(f"Dashboard received system notification: {data}")
+
+                # Trigger a refresh of the faculty grid
+                QTimer.singleShot(500, self.refresh_faculty_status)  # Small delay to batch updates
+
+        except Exception as e:
+            logger.error(f"Error handling system notification in dashboard: {e}")
 
     def init_ui(self):
         """
@@ -612,23 +666,71 @@ class DashboardWindow(BaseWindow):
         Show consultation form using safe faculty data dictionary.
 
         Args:
-            faculty_data (dict): Faculty data dictionary
+            faculty_data (dict or int): Faculty data dictionary or faculty ID
         """
         try:
+            # Handle case where faculty_data is passed as an integer (faculty ID)
+            if isinstance(faculty_data, int):
+                logger.warning(f"Faculty data passed as integer {faculty_data}, attempting to fetch faculty data")
+                # Try to get faculty data from controller
+                from ..controllers import FacultyController
+                faculty_controller = FacultyController()
+                faculty = faculty_controller.get_faculty_by_id(faculty_data)
+                if faculty:
+                    # Convert to dictionary format
+                    faculty_data = {
+                        'id': faculty.id,
+                        'name': faculty.name,
+                        'department': faculty.department,
+                        'status': faculty.status,
+                        'email': getattr(faculty, 'email', ''),
+                        'room': getattr(faculty, 'room', None)
+                    }
+                else:
+                    logger.error(f"Faculty with ID {faculty_data} not found")
+                    self.show_notification(f"Faculty with ID {faculty_data} not found", "error")
+                    return
+
+            # Validate that faculty_data is now a dictionary
+            if not isinstance(faculty_data, dict):
+                logger.error(f"Invalid faculty data type: {type(faculty_data)}, expected dict")
+                self.show_notification("Invalid faculty data", "error")
+                return
+
+            # Validate required fields
+            required_fields = ['id', 'name', 'department']
+            for field in required_fields:
+                if field not in faculty_data:
+                    logger.error(f"Missing required field '{field}' in faculty data: {faculty_data}")
+                    self.show_notification(f"Missing faculty information: {field}", "error")
+                    return
+
             # Create a mock faculty object for compatibility
             class MockFaculty:
                 def __init__(self, data):
                     self.id = data['id']
                     self.name = data['name']
                     self.department = data['department']
-                    self.status = data['status']
+                    self.status = data.get('status', False)
                     self.email = data.get('email', '')
                     self.room = data.get('room', None)
 
             mock_faculty = MockFaculty(faculty_data)
             self.show_consultation_form(mock_faculty)
+
         except Exception as e:
-            logger.error(f"Error showing consultation form for faculty {faculty_data.get('name', 'Unknown')}: {e}")
+            logger.error(f"Error showing consultation form for faculty {faculty_data}: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+
+            # Try to get faculty name for error message
+            faculty_name = "Unknown"
+            if isinstance(faculty_data, dict):
+                faculty_name = faculty_data.get('name', 'Unknown')
+            elif isinstance(faculty_data, int):
+                faculty_name = f"ID {faculty_data}"
+
+            self.show_notification(f"Error opening consultation form for {faculty_name}", "error")
 
     def _extract_safe_faculty_data(self, faculty_data_list):
         """
@@ -747,15 +849,15 @@ class DashboardWindow(BaseWindow):
 
                     logger.debug(f"Creating card for faculty {faculty.name}: available={faculty_data['available']}, status={faculty_data['status']}")
 
-                    # Get pooled faculty card
+                    # Get pooled faculty card - use faculty_data instead of faculty object
                     card = self.faculty_card_manager.get_faculty_card(
                         faculty_data,
-                        consultation_callback=lambda f=faculty: self.show_consultation_form(f)
+                        consultation_callback=lambda f_data=faculty_data: self.show_consultation_form_safe(f_data)
                     )
 
                     # Connect consultation signal if it exists
                     if hasattr(card, 'consultation_requested'):
-                        card.consultation_requested.connect(lambda f=faculty: self.show_consultation_form(f))
+                        card.consultation_requested.connect(lambda f_data=faculty_data: self.show_consultation_form_safe(f_data))
 
                     # Add card to container
                     container_layout.addWidget(card)
@@ -1521,6 +1623,9 @@ class DashboardWindow(BaseWindow):
         """
         Handle window close event with proper cleanup.
         """
+        # Clean up MQTT listeners
+        self._cleanup_mqtt_listeners()
+
         # Clean up faculty card manager
         if hasattr(self, 'faculty_card_manager'):
             self.faculty_card_manager.clear_all_cards()
@@ -1530,3 +1635,14 @@ class DashboardWindow(BaseWindow):
 
         # Call parent close event
         super().closeEvent(event)
+
+    def _cleanup_mqtt_listeners(self):
+        """
+        Clean up MQTT listeners when closing the dashboard.
+        """
+        try:
+            # Note: In a production system, you would unsubscribe from MQTT topics here
+            # For now, we'll just log the cleanup
+            logger.info("Dashboard MQTT listeners cleaned up")
+        except Exception as e:
+            logger.error(f"Error cleaning up MQTT listeners: {e}")

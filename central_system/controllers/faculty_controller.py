@@ -384,6 +384,10 @@ class FacultyController:
                 from ..services.database_manager import get_database_manager
                 db_manager = get_database_manager()
 
+                faculty_data = None
+                updated_faculty = None
+                previous_status = None
+
                 with db_manager.get_session_context() as db:
                     # Use SELECT FOR UPDATE to lock the row and prevent concurrent modifications
                     faculty = db.query(Faculty).filter(Faculty.id == faculty_id).with_for_update().first()
@@ -395,6 +399,15 @@ class FacultyController:
                     # Check if status actually changed to avoid unnecessary updates
                     if faculty.status == status:
                         logger.debug(f"Faculty {faculty.name} (ID: {faculty.id}) status unchanged: {status}")
+                        # Still create faculty data for consistency
+                        faculty_data = {
+                            'id': faculty.id,
+                            'name': faculty.name,
+                            'department': faculty.department,
+                            'status': faculty.status,
+                            'last_seen': faculty.last_seen.isoformat() if faculty.last_seen else None,
+                            'version': getattr(faculty, 'version', 1)
+                        }
                         return faculty
 
                     # Store previous status for logging
@@ -422,14 +435,28 @@ class FacultyController:
                         'version': getattr(faculty, 'version', 1)
                     }
 
+                    # Store reference to updated faculty for return
+                    updated_faculty = faculty
+
+                    # Commit the transaction explicitly
+                    db.commit()
+
+                    # Refresh the faculty object to ensure it's up to date
+                    db.refresh(faculty)
+
                 # Invalidate faculty cache when status changes (outside transaction)
                 invalidate_faculty_cache()
                 invalidate_cache_pattern("get_all_faculty")
 
                 # Publish MQTT notification with sequence number to ensure ordering
-                self._publish_status_update_with_sequence_safe(faculty_data, status, previous_status)
+                if faculty_data and previous_status is not None:
+                    self._publish_status_update_with_sequence_safe(faculty_data, status, previous_status)
 
-                return faculty
+                # Notify callbacks about the status change
+                if updated_faculty:
+                    self._notify_callbacks(updated_faculty)
+
+                return updated_faculty
 
             except Exception as e:
                 logger.error(f"Error updating faculty status atomically: {str(e)}")
