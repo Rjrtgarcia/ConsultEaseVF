@@ -622,7 +622,7 @@ class FacultyController:
         return None
 
     @cached_query(ttl=30)  # Reduced cache time to 30 seconds for more frequent updates
-    def get_all_faculty(self, filter_available=None, search_term=None, page=None, page_size=50):
+    def get_all_faculty(self, filter_available=None, search_term=None, page=None, page_size=50, safe_mode=False):
         """
         Get all faculty, optionally filtered by availability or search term.
         Results are cached for improved performance with optional pagination.
@@ -632,9 +632,10 @@ class FacultyController:
             search_term (str, optional): Search term for name or department
             page (int, optional): Page number for pagination (1-based)
             page_size (int): Number of items per page
+            safe_mode (bool): If True, return safe dictionaries instead of Faculty objects
 
         Returns:
-            list or dict: List of Faculty objects, or paginated results if page is specified
+            list or dict: List of Faculty objects/dictionaries, or paginated results if page is specified
         """
         try:
             from ..services.database_manager import get_database_manager
@@ -666,15 +667,35 @@ class FacultyController:
                 # For backward compatibility, return all results if no pagination
                 faculties = query.all()
 
-                # Ensure all attributes are loaded before returning
-                for faculty in faculties:
-                    # Access attributes to ensure they're loaded
-                    _ = faculty.id, faculty.name, faculty.department, faculty.status
-                    _ = getattr(faculty, 'always_available', False)
-                    _ = getattr(faculty, 'email', '')
+                # If safe_mode is enabled, convert to dictionaries
+                if safe_mode:
+                    safe_faculties = []
+                    for faculty in faculties:
+                        safe_faculty = {
+                            'id': faculty.id,
+                            'name': faculty.name,
+                            'department': faculty.department,
+                            'email': faculty.email,
+                            'ble_id': faculty.ble_id,
+                            'status': faculty.status,
+                            'always_available': getattr(faculty, 'always_available', False),
+                            'last_seen': faculty.last_seen.isoformat() if faculty.last_seen else None,
+                            'image_path': getattr(faculty, 'image_path', None)
+                        }
+                        safe_faculties.append(safe_faculty)
 
-                logger.debug(f"Retrieved {len(faculties)} faculty members")
-                return faculties
+                    logger.debug(f"Retrieved {len(safe_faculties)} faculty members (safe mode)")
+                    return safe_faculties
+                else:
+                    # Ensure all attributes are loaded before returning
+                    for faculty in faculties:
+                        # Access attributes to ensure they're loaded
+                        _ = faculty.id, faculty.name, faculty.department, faculty.status
+                        _ = getattr(faculty, 'always_available', False)
+                        _ = getattr(faculty, 'email', '')
+
+                    logger.debug(f"Retrieved {len(faculties)} faculty members")
+                    return faculties
 
         except Exception as e:
             logger.error(f"Error getting faculty list: {str(e)}")

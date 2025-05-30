@@ -189,6 +189,25 @@ class AdminDashboardWindow(BaseWindow):
         # Forward signal
         self.student_updated.emit()
 
+    def refresh_data(self):
+        """
+        Refresh data in all tabs. This method is called by the main application
+        when faculty data is updated to ensure all dashboards stay synchronized.
+        """
+        try:
+            # Refresh faculty tab data
+            if hasattr(self, 'faculty_tab') and self.faculty_tab:
+                self.faculty_tab.refresh_data()
+                logger.debug("Admin dashboard faculty tab refreshed")
+
+            # Refresh student tab data if needed
+            if hasattr(self, 'student_tab') and self.student_tab:
+                self.student_tab.refresh_data()
+                logger.debug("Admin dashboard student tab refreshed")
+
+        except Exception as e:
+            logger.error(f"Error refreshing admin dashboard data: {e}")
+
 class FacultyManagementTab(QWidget):
     """
     Tab for managing faculty members.
@@ -425,8 +444,8 @@ class FacultyManagementTab(QWidget):
             if self._last_data_hash is None:
                 self._show_loading_indicator()
 
-            # Get all faculty from the controller
-            faculties = self.faculty_controller.get_all_faculty()
+            # Get all faculty from the controller using safe mode to avoid session binding issues
+            faculties = self.faculty_controller.get_all_faculty(safe_mode=True)
 
             # Reset error tracking on successful data fetch
             self._consecutive_errors = 0
@@ -434,7 +453,7 @@ class FacultyManagementTab(QWidget):
 
             # Create a hash of the current data to check for changes
             import hashlib
-            faculty_data_str = str([(f.id, f.name, f.department, f.email, f.ble_id, f.status, f.always_available) for f in faculties])
+            faculty_data_str = str([(f['id'], f['name'], f['department'], f['email'], f['ble_id'], f['status'], f['always_available']) for f in faculties])
             current_hash = hashlib.md5(faculty_data_str.encode()).hexdigest()
 
             # Only update UI if data has changed
@@ -457,23 +476,23 @@ class FacultyManagementTab(QWidget):
                 row_position = self.faculty_table.rowCount()
                 self.faculty_table.insertRow(row_position)
 
-                # Add data to each column
-                self.faculty_table.setItem(row_position, 0, QTableWidgetItem(str(faculty.id)))
-                self.faculty_table.setItem(row_position, 1, QTableWidgetItem(faculty.name))
-                self.faculty_table.setItem(row_position, 2, QTableWidgetItem(faculty.department))
-                self.faculty_table.setItem(row_position, 3, QTableWidgetItem(faculty.email))
-                self.faculty_table.setItem(row_position, 4, QTableWidgetItem(faculty.ble_id or ""))
+                # Add data to each column (faculty is now a dictionary)
+                self.faculty_table.setItem(row_position, 0, QTableWidgetItem(str(faculty['id'])))
+                self.faculty_table.setItem(row_position, 1, QTableWidgetItem(faculty['name']))
+                self.faculty_table.setItem(row_position, 2, QTableWidgetItem(faculty['department']))
+                self.faculty_table.setItem(row_position, 3, QTableWidgetItem(faculty['email']))
+                self.faculty_table.setItem(row_position, 4, QTableWidgetItem(faculty['ble_id'] or ""))
 
-                status_item = QTableWidgetItem("Available" if faculty.status else "Unavailable")
-                if faculty.status:
+                status_item = QTableWidgetItem("Available" if faculty['status'] else "Unavailable")
+                if faculty['status']:
                     status_item.setBackground(Qt.green)
                 else:
                     status_item.setBackground(Qt.red)
                 self.faculty_table.setItem(row_position, 5, status_item)
 
                 # Add always available status
-                always_available_item = QTableWidgetItem("Yes" if faculty.always_available else "No")
-                if faculty.always_available:
+                always_available_item = QTableWidgetItem("Yes" if faculty['always_available'] else "No")
+                if faculty['always_available']:
                     always_available_item.setBackground(Qt.green)
                 self.faculty_table.setItem(row_position, 6, always_available_item)
 
@@ -932,7 +951,8 @@ class BeaconManagementDialog(QDialog):
     def load_faculty_data(self):
         """Load faculty data for beacon assignment."""
         try:
-            faculty_list = self.faculty_controller.get_all_faculty()
+            # Use safe mode to avoid session binding issues
+            faculty_list = self.faculty_controller.get_all_faculty(safe_mode=True)
             # Pass faculty data to tabs that need it
             self.assignment_tab.set_faculty_data(faculty_list)
             self.config_tab.set_faculty_data(faculty_list)
@@ -1191,7 +1211,8 @@ class BeaconAssignmentTab(QWidget):
             faculty_combo = QComboBox()
             faculty_combo.addItem("-- Select Faculty --", None)
             for faculty in self.faculty_data:
-                faculty_combo.addItem(f"{faculty.name} (ID: {faculty.id})", faculty.id)
+                # faculty is now a dictionary, not an object
+                faculty_combo.addItem(f"{faculty['name']} (ID: {faculty['id']})", faculty['id'])
 
             self.assignment_table.setCellWidget(row, 2, faculty_combo)
 
