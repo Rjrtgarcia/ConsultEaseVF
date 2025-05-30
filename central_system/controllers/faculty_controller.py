@@ -71,6 +71,19 @@ class FacultyController:
             except Exception as e:
                 logger.error(f"Error in Faculty controller callback: {str(e)}")
 
+    def _notify_callbacks_safe(self, faculty_data):
+        """
+        Notify all registered callbacks about faculty status change using safe data.
+
+        Args:
+            faculty_data (dict): Safe faculty data dictionary
+        """
+        for callback in self.callbacks:
+            try:
+                callback(faculty_data)
+            except Exception as e:
+                logger.error(f"Error in Faculty controller callback: {str(e)}")
+
     def handle_faculty_status_update(self, topic, data):
         """
         Handle faculty status update from MQTT.
@@ -107,32 +120,38 @@ class FacultyController:
                         return
 
                     # Update faculty status in database
-                    faculty = self.update_faculty_status(faculty_id, status)
+                    faculty_data = self.update_faculty_status(faculty_id, status)
 
-                    if faculty:
+                    if faculty_data:
                         # Store the detected MAC address if present
                         if detected_mac and status:
                             # Normalize the MAC address
                             normalized_mac = Faculty.normalize_mac_address(detected_mac)
-                            if normalized_mac != faculty.ble_id:
-                                logger.info(f"Updating faculty {faculty_id} BLE ID from {faculty.ble_id} to {normalized_mac}")
-                                # Update the BLE ID with the detected MAC address
-                                db = get_db()
-                                faculty.ble_id = normalized_mac
-                                db.commit()
+                            # Get current BLE ID from database to compare
+                            try:
+                                from ..services.database_manager import get_database_manager
+                                db_manager = get_database_manager()
+                                with db_manager.get_session_context() as db:
+                                    faculty = db.query(Faculty).filter(Faculty.id == faculty_id).first()
+                                    if faculty and normalized_mac != faculty.ble_id:
+                                        logger.info(f"Updating faculty {faculty_id} BLE ID from {faculty.ble_id} to {normalized_mac}")
+                                        faculty.ble_id = normalized_mac
+                                        db.commit()
+                            except Exception as e:
+                                logger.error(f"Error updating BLE ID: {e}")
 
-                        # Notify callbacks
-                        self._notify_callbacks(faculty)
+                        # Notify callbacks with safe data
+                        self._notify_callbacks_safe(faculty_data)
 
                         # Publish notification
                         try:
                             notification = {
                                 'type': 'faculty_mac_status',
-                                'faculty_id': faculty.id,
-                                'faculty_name': faculty.name,
+                                'faculty_id': faculty_data['id'],
+                                'faculty_name': faculty_data['name'],
                                 'status': status,
                                 'detected_mac': detected_mac,
-                                'timestamp': faculty.last_seen.isoformat() if faculty.last_seen else None
+                                'timestamp': faculty_data.get('last_seen')
                             }
                             publish_mqtt_message(MQTTTopics.SYSTEM_NOTIFICATIONS, notification)
                         except Exception as e:
@@ -317,10 +336,10 @@ class FacultyController:
 
         # Update faculty status in database
         logger.info(f"💾 Attempting database update for faculty {faculty_id} with status {status}")
-        faculty = self.update_faculty_status(faculty_id, status)
+        faculty_data = self.update_faculty_status(faculty_id, status)
 
-        if faculty:
-            logger.info(f"✅ Successfully updated faculty {faculty.name} (ID: {faculty.id}) status to {status}")
+        if faculty_data:
+            logger.info(f"✅ Successfully updated faculty {faculty_data['name']} (ID: {faculty_data['id']}) status to {status}")
 
             # Verify the update by checking current status
             try:
@@ -337,39 +356,31 @@ class FacultyController:
         else:
             logger.error(f"❌ Failed to update faculty {faculty_id} status in database")
 
-        if faculty:
+        if faculty_data:
             # Notify consultation queue service about faculty status change
             self.queue_service.update_faculty_status(faculty_id, status)
 
-            # Create a safe faculty data dictionary for callbacks to avoid DetachedInstanceError
+            # Use the safe faculty data dictionary for callbacks
             try:
-                faculty_data_for_callback = {
-                    'id': faculty.id,
-                    'name': faculty.name,
-                    'department': faculty.department,
-                    'status': faculty.status,
-                    'last_seen': faculty.last_seen.isoformat() if faculty.last_seen else None
-                }
-
                 # Notify callbacks with safe data
                 for callback in self.callbacks:
                     try:
                         # Pass the safe data dictionary instead of the faculty object
-                        callback(faculty_data_for_callback)
+                        callback(faculty_data)
                     except Exception as e:
                         logger.error(f"Error in Faculty controller callback: {str(e)}")
 
             except Exception as e:
-                logger.error(f"Error creating faculty data for callbacks: {str(e)}")
+                logger.error(f"Error notifying callbacks: {str(e)}")
 
             # Publish a notification about faculty availability using async MQTT
             try:
                 notification = {
                     'type': 'faculty_status',
-                    'faculty_id': faculty.id,
-                    'faculty_name': faculty.name,
+                    'faculty_id': faculty_data['id'],
+                    'faculty_name': faculty_data['name'],
                     'status': status,
-                    'timestamp': faculty.last_seen.isoformat() if faculty.last_seen else None
+                    'timestamp': faculty_data.get('last_seen')
                 }
                 publish_mqtt_message(MQTTTopics.SYSTEM_NOTIFICATIONS, notification)
             except Exception as e:
@@ -384,7 +395,7 @@ class FacultyController:
             status (bool): New status (True = Available, False = Unavailable)
 
         Returns:
-            Faculty: Updated faculty object or None if not found
+            dict: Safe faculty data dictionary or None if not found
         """
         import threading
 
@@ -403,7 +414,6 @@ class FacultyController:
                 db_manager = get_database_manager()
 
                 faculty_data = None
-                updated_faculty = None
                 previous_status = None
 
                 with db_manager.get_session_context() as db:
@@ -426,7 +436,7 @@ class FacultyController:
                             'last_seen': faculty.last_seen.isoformat() if faculty.last_seen else None,
                             'version': getattr(faculty, 'version', 1)
                         }
-                        return faculty
+                        return faculty_data
 
                     # Store previous status for logging
                     previous_status = faculty.status
@@ -453,9 +463,6 @@ class FacultyController:
                         'version': getattr(faculty, 'version', 1)
                     }
 
-                    # Store reference to updated faculty for return
-                    updated_faculty = faculty
-
                     # Commit the transaction explicitly
                     db.commit()
 
@@ -473,7 +480,7 @@ class FacultyController:
                 # Note: Don't call _notify_callbacks here as it's called in handle_faculty_status_update
                 # to avoid duplicate notifications and potential DetachedInstanceError
 
-                return updated_faculty
+                return faculty_data
 
             except Exception as e:
                 logger.error(f"Error updating faculty status atomically: {str(e)}")
@@ -579,7 +586,7 @@ class FacultyController:
             source (str): Source of the update (e.g., "mqtt", "ble", "manual")
 
         Returns:
-            Faculty: Updated faculty object or None if failed
+            dict: Safe faculty data dictionary or None if failed
         """
         max_retries = 3
         retry_delay = 0.1  # 100ms
@@ -587,11 +594,11 @@ class FacultyController:
         for attempt in range(max_retries):
             try:
                 # Attempt atomic update
-                faculty = self.update_faculty_status(faculty_id, status)
+                faculty_data = self.update_faculty_status(faculty_id, status)
 
-                if faculty:
+                if faculty_data:
                     logger.info(f"Successfully updated faculty {faculty_id} status to {status} from {source} (attempt {attempt + 1})")
-                    return faculty
+                    return faculty_data
                 else:
                     logger.warning(f"Failed to update faculty {faculty_id} status (attempt {attempt + 1})")
 
