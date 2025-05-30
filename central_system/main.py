@@ -638,40 +638,28 @@ class ConsultEaseApp:
                 self.dashboard_window.consultation_panel.set_student(student_data)
                 self.dashboard_window.consultation_panel.refresh_history()
 
-        # Populate faculty grid with fresh data
+        # Populate faculty grid with fresh data using safe mode
         try:
-            # Force fresh data retrieval to avoid DetachedInstanceError
-            faculties = self.faculty_controller.get_all_faculty()
-            logger.info(f"Retrieved {len(faculties)} faculty members for dashboard")
-
-            # Convert to safe data format to avoid session issues
-            safe_faculty_data = []
-            for faculty in faculties:
-                try:
-                    # Access all attributes while session is active
-                    faculty_data = {
-                        'id': faculty.id,
-                        'name': faculty.name,
-                        'department': faculty.department,
-                        'status': faculty.status,
-                        'always_available': getattr(faculty, 'always_available', False),
-                        'email': getattr(faculty, 'email', ''),
-                        'room': getattr(faculty, 'room', None),
-                        'ble_id': getattr(faculty, 'ble_id', ''),
-                        'last_seen': faculty.last_seen
-                    }
-                    safe_faculty_data.append(faculty_data)
-                except Exception as attr_error:
-                    logger.warning(f"Error accessing faculty {faculty.id} attributes: {attr_error}")
-                    continue
+            # Use safe mode to get faculty data as dictionaries to avoid session binding issues
+            safe_faculty_data = self.faculty_controller.get_all_faculty(safe_mode=True)
+            logger.info(f"Retrieved {len(safe_faculty_data)} faculty members for dashboard (safe mode)")
 
             # Pass safe data to dashboard
-            self.dashboard_window.populate_faculty_grid_safe(safe_faculty_data)
+            if hasattr(self.dashboard_window, 'populate_faculty_grid_safe'):
+                self.dashboard_window.populate_faculty_grid_safe(safe_faculty_data)
+            else:
+                # Fallback to regular method if safe method doesn't exist yet
+                self.dashboard_window.populate_faculty_grid(safe_faculty_data)
 
         except Exception as e:
             logger.error(f"Error retrieving faculty data for dashboard: {e}")
             # Show empty grid if there's an error
-            self.dashboard_window.populate_faculty_grid_safe([])
+            if hasattr(self.dashboard_window, 'populate_faculty_grid_safe'):
+                self.dashboard_window.populate_faculty_grid_safe([])
+            else:
+                logger.info("Populating faculty grid with 0 faculty members (safe mode)")
+                # Create empty safe data structure
+                self.dashboard_window.populate_faculty_grid([])
 
         # Determine which window is currently visible
         current_window = None
@@ -951,13 +939,22 @@ class ConsultEaseApp:
         # Refresh student dashboard if active
         if self.dashboard_window and self.dashboard_window.isVisible():
             try:
-                faculties = self.faculty_controller.get_all_faculty()
-                logger.info(f"Refreshing student dashboard with {len(faculties)} faculty members")
-                self.dashboard_window.populate_faculty_grid(faculties)
+                # Use safe mode to avoid session binding issues
+                faculties = self.faculty_controller.get_all_faculty(safe_mode=True)
+                logger.info(f"Refreshing student dashboard with {len(faculties)} faculty members (safe mode)")
+
+                # Use safe method if available
+                if hasattr(self.dashboard_window, 'populate_faculty_grid_safe'):
+                    self.dashboard_window.populate_faculty_grid_safe(faculties)
+                else:
+                    self.dashboard_window.populate_faculty_grid(faculties)
 
                 # Also update the consultation panel's faculty options
                 if hasattr(self.dashboard_window, 'consultation_panel'):
-                    self.dashboard_window.consultation_panel.set_faculty_options(faculties)
+                    if hasattr(self.dashboard_window.consultation_panel, 'set_faculty_options_safe'):
+                        self.dashboard_window.consultation_panel.set_faculty_options_safe(faculties)
+                    else:
+                        self.dashboard_window.consultation_panel.set_faculty_options(faculties)
 
             except Exception as e:
                 logger.error(f"Error refreshing student dashboard: {e}")
